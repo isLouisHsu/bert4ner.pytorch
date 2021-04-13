@@ -1,0 +1,6 @@
+*.pyc
+*.lock
+.vscode/
+outputs/*
+cache/*
+!*/.gitkeep

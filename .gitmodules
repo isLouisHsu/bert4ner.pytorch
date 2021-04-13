@@ -1,0 +1,3 @@
+[submodule "Chinese-NLP-Corpus"]
+	path = Chinese-NLP-Corpus
+	url = https://github.com/OYE93/Chinese-NLP-Corpus.git
