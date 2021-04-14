@@ -424,7 +424,7 @@ class Example2Feature:
         return self._convert_example_to_feature(example)
 
     def _encode_label(self, label, input_len):
-        label = label[:input_len - 2]
+        label = label[:input_len - 2]   # truncation
         label = ["O"] + label + ["O"]
         label = label + ["O"] * (self.max_seq_length - len(label))
         label = [self.label2id[lb] for lb in label]

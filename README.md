@@ -43,11 +43,11 @@ Named Entity Recognition Prediction Header including
 - [MRC-modified](https://arxiv.org/abs/1910.11476): A Unified MRC Framework for Named Entity Recognition
 - [Biaffine](https://arxiv.org/abs/2005.07150): Named Entity Recognition as Dependency Parsing
 
-### Experiments
+### Benchmarks
 
-#### CLUENER2000
+#### Models
 
-The performance on **dev**(F1 score)
+The performance on **dev** set of `CLUENER2000`(F1 score).
 | entitiy       | Human Performance | Bert-crf | Bert-span |
 |:-------------:|:-----:|:-----:|:-----:|
 | Address       | 43.04 | 64.30 | 65.76 |
@@ -62,6 +62,8 @@ The performance on **dev**(F1 score)
 | Scene         | 51.85 | 76.56 | 72.37 |
 | Overall@Macro | 63.41 | 80.38 | 80.84 |
 | Overall@Micro | /     | 80.26 | 81.00 |
+
+#### Datasets
 
 ### Reference
 
