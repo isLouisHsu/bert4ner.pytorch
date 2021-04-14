@@ -2,10 +2,10 @@ import os
 import sys
 import time
 import json
+import glob
 import random
 import logging
 from pathlib import Path
-from dataclasses import dataclass
 from argparse import ArgumentParser, Namespace
 from tqdm import tqdm
 
@@ -13,33 +13,30 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 import numpy as np
-from seqeval.metrics import (
-    accuracy_score,
-    classification_report, 
-    performance_measure,
-    f1_score, precision_score, recall_score
-)
 
 # datasets
-from transformers.data import DataProcessor, InputExample
+from transformers.data import DataProcessor
 
 # models
 import transformers
+from transformers import WEIGHTS_NAME
 from transformers import (
     BertConfig, 
     BertTokenizer,
 )
-from models.bert_for_ner import BertCrfForNer
+from models.bert_for_ner import BertSpanForNer
 
 # trainer & training arguments
-from transformers import HfArgumentParser
 from transformers import AdamW, get_linear_schedule_with_warmup
 
-def args_to_json(json_file, args):
-    Path(json_file).write_text(json.dumps(vars(args), indent=4))
-
-def args_from_json(json_file):
-    return Namespace(**json.loads(Path(json_file).read_text()))
+# metrics
+from seqeval.metrics.sequence_labeling import (
+    accuracy_score,
+    classification_report, 
+    performance_measure,
+    f1_score, precision_score, recall_score,
+    get_entities
+)
 
 class NerArgumentParser(ArgumentParser):
 
@@ -79,8 +76,8 @@ class NerArgumentParser(ArgumentParser):
                             help="The output directory where the model predictions and checkpoints will be written.", )
 
         # Other parameters
-        self.add_argument('--markup', default='bio', type=str,
-                            choices=['bios', 'bio'])
+        self.add_argument('--scheme', default='IOB2', type=str,
+                            choices=['IOB2', 'IOBES'])
         self.add_argument('--loss_type', default='ce', type=str,
                             choices=['lsr', 'focal', 'ce'])
         self.add_argument("--config_name", default="", type=str,
@@ -103,15 +100,17 @@ class NerArgumentParser(ArgumentParser):
                             help="Whether to run predictions on the test set.")
         self.add_argument("--evaluate_during_training", action="store_true",
                             help="Whether to run evaluation during training at each logging step.", )
+        self.add_argument("--evaluate_each_epoch", action="store_true",
+                            help="Whether to run evaluation during training at each epoch, `--logging_step` will be ignored", )
         self.add_argument("--do_lower_case", action="store_true",
                             help="Set this flag if you are using an uncased model.")
                             
         # adversarial training
-        self.add_argument("--do_adv", action="store_true",
+        self.add_argument("--do_fgm", action="store_true",
                             help="Whether to adversarial training.")
-        self.add_argument('--adv_epsilon', default=1.0, type=float,
+        self.add_argument('--fgm_epsilon', default=1.0, type=float,
                             help="Epsilon for adversarial.")
-        self.add_argument('--adv_name', default='word_embeddings', type=str,
+        self.add_argument('--fgm_name', default='word_embeddings', type=str,
                             help="name for adversarial layer.")
 
         self.add_argument("--per_gpu_train_batch_size", default=8, type=int,
@@ -139,7 +138,9 @@ class NerArgumentParser(ArgumentParser):
                             help="Proportion of training to perform linear learning rate warmup for,E.g., 0.1 = 10% of training.")
         self.add_argument("--logging_steps", type=int, default=50, help="Log every X updates steps.")
         self.add_argument("--save_steps", type=int, default=50, help="Save checkpoint every X updates steps.")
-        self.add_argument("--predict_checkpoints",type=int, default=0,
+        self.add_argument("--save_best_checkpoints", action="store_true", help="Save best checkpoint each `--logging_steps`, `--save_step` will be ignore")
+        self.add_argument("--eval_all_checkpoints", action="store_true", help="Evaluate all checkpoints starting with the same prefix as model_name ending and ending with step number", )
+        self.add_argument("--predict_checkpoints", type=int, default=0,
                             help="predict checkpoints starting with the same prefix as model_name ending and ending with step number")
         self.add_argument("--no_cuda", action="store_true", help="Avoid using CUDA when available")
         self.add_argument("--overwrite_output_dir", action="store_true",
@@ -153,7 +154,7 @@ class NerArgumentParser(ArgumentParser):
         self.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
 
         return self
-    
+
 class NerProcessor(DataProcessor):
 
     def get_train_examples(self, data_dir, data_file):
@@ -182,23 +183,36 @@ class NerProcessor(DataProcessor):
     
     def _create_examples(self, data_dir, data_file, mode):
         raise NotImplementedError()
+    
+    def tags2se(self, ner_tags):
+        entities = get_entities(ner_tags)
+        start_positions = ["O"] * len(ner_tags)
+        end_positions   = ["O"] * len(ner_tags)
+        for t, s, e in entities:
+            start_positions[s] = t
+            end_positions[e] = t
+        return start_positions, end_positions
+    
+    def entities2tags(self, entities, seq_len):
+        ner_tags = ["O"] * seq_len
+        for t, s, e in entities:
+            if s >= seq_len or e >= seq_len:
+                continue
+            ner_tags[s] = f"B-{t}"
+            for i in range(s + 1, e + 1):
+                ner_tags[i] = f"I-{t}"
+        return ner_tags
 
 class MsraNerProcessor(NerProcessor):
 
     def get_labels(self):
         return [
-            "O",
-            "B-PER",
-            "I-PER",
-            "B-ORG",
-            "I-ORG",
-            "B-LOC",
-            "I-LOC",
+            "X", "O", "[START]", "[END]",
+            "PER", "ORG", "LOC",
         ]
     
     def _create_examples(self, data_dir, data_file, mode):
         filepath = os.path.join(data_dir, data_file)
-        logger.info("⏳ Generating examples from = %s", filepath)
         with open(filepath, encoding="utf-8") as f:
             guid = 0
             tokens = []
@@ -207,10 +221,12 @@ class MsraNerProcessor(NerProcessor):
                 line_stripped = line.strip()
                 if line_stripped == "":
                     if tokens:
+                        start_positions, end_positions = self.tags2se(ner_tags)
                         yield guid, {
                             "id": f"{mode}-{str(guid)}",
                             "tokens": tokens,
-                            "ner_tags": ner_tags,
+                            "start_positions": start_positions if mode in ["train", "dev"] else None,
+                            "end_positions": end_positions if mode in ["train", "dev"] else None,
                         }
                         guid += 1
                         tokens = []
@@ -222,28 +238,24 @@ class MsraNerProcessor(NerProcessor):
                     tokens.append(splits[0])
                     ner_tags.append(splits[1])
             # last example
+            start_positions, end_positions = self.tags2se(ner_tags)
             yield guid, {
                 "id": f"{mode}-{str(guid)}",
                 "tokens": tokens,
-                "ner_tags": ner_tags,
+                "start_positions": start_positions if mode in ["train", "dev"] else None,
+                "end_positions": end_positions if mode in ["train", "dev"] else None,
             }
 
 class PeoplesDailyNerProcessor(NerProcessor):
 
     def get_labels(self):
         return [
-            "O",
-            "B-PER",
-            "I-PER",
-            "B-ORG",
-            "I-ORG",
-            "B-LOC",
-            "I-LOC",
+            "X", "O", "[START]", "[END]",
+            "PER", "ORG", "LOC",
         ]
     
     def _create_examples(self, data_dir, data_file, mode):
         filepath = os.path.join(data_dir, data_file)
-        logger.info("⏳ Generating examples from = %s", filepath)
         with open(filepath, encoding="utf-8") as f:
             guid = 0
             tokens = []
@@ -252,10 +264,12 @@ class PeoplesDailyNerProcessor(NerProcessor):
                 line_stripped = line.strip()
                 if line_stripped == "":
                     if tokens:
+                        start_positions, end_positions = self.tags2se(ner_tags)
                         yield guid, {
                             "id": f"{mode}-{str(guid)}",
                             "tokens": tokens,
-                            "ner_tags": ner_tags,
+                            "start_positions": start_positions if mode in ["train", "dev"] else None,
+                            "end_positions": end_positions if mode in ["train", "dev"] else None,
                         }
                         guid += 1
                         tokens = []
@@ -267,33 +281,20 @@ class PeoplesDailyNerProcessor(NerProcessor):
                     tokens.append(splits[0])
                     ner_tags.append(splits[1])
             # last example
+            start_positions, end_positions = self.tags2se(ner_tags)
             yield guid, {
                 "id": f"{mode}-{str(guid)}",
                 "tokens": tokens,
-                "ner_tags": ner_tags,
+                "start_positions": start_positions if mode in ["train", "dev"] else None,
+                "end_positions": end_positions if mode in ["train", "dev"] else None,
             }
 
 class WeiboNerProcessor(NerProcessor):
 
     def get_labels(self):
         return [
-            "B-GPE.NAM",
-            "B-GPE.NOM",
-            "B-LOC.NAM",
-            "B-LOC.NOM",
-            "B-ORG.NAM",
-            "B-ORG.NOM",
-            "B-PER.NAM",
-            "B-PER.NOM",
-            "I-GPE.NAM",
-            "I-GPE.NOM",
-            "I-LOC.NAM",
-            "I-LOC.NOM",
-            "I-ORG.NAM",
-            "I-ORG.NOM",
-            "I-PER.NAM",
-            "I-PER.NOM",
-            "O",
+            "X", "O", "[START]", "[END]",
+            "GPE.NAM", "GPE.NOM", "LOC.NAM", "LOC.NOM", "ORG.NAM", "ORG.NOM", "PER.NAM", "PER.NOM",
         ]
     
     def _create_examples(self, data_dir, data_file, mode):
@@ -301,43 +302,83 @@ class WeiboNerProcessor(NerProcessor):
         data_path = os.path.join(data_dir, data_file)
         with open(data_path, encoding="utf-8") as f:
             current_words = []
-            current_labels = []
+            ner_tags = []
             for row in f:
                 row = row.rstrip()
                 row_split = row.split("\t")
                 if len(row_split) == 2:
                     token, label = row_split
                     current_words.append(token[0])
-                    current_labels.append(label)
+                    ner_tags.append(label)
                 else:
                     if not current_words:
                         continue
-                    assert len(current_words) == len(current_labels), "word len doesnt match label length"
+                    assert len(current_words) == len(ner_tags), "word len doesnt match label length"
+                    start_positions, end_positions = self.tags2se(ner_tags)
                     sentence = (
                         sentence_counter,
                         {
                             "id": f"{mode}-{str(sentence_counter)}",
                             "tokens": current_words,
-                            "ner_tags": current_labels,
+                            "start_positions": start_positions if mode in ["train", "dev"] else None,
+                            "end_positions": end_positions if mode in ["train", "dev"] else None,
                         },
                     )
                     sentence_counter += 1
                     current_words = []
-                    current_labels = []
+                    ner_tags = []
                     yield sentence
 
             # if something remains:
             if current_words:
+                start_positions, end_positions = self.tags2se(ner_tags)
                 sentence = (
                     sentence_counter,
                     {
                         "id": f"{mode}-{str(sentence_counter)}",
                         "tokens": current_words,
-                        "ner_tags": current_labels,
+                        "start_positions": start_positions if mode in ["train", "dev"] else None,
+                        "end_positions": end_positions if mode in ["train", "dev"] else None,
                     },
                 )
                 yield sentence
 
+class ClueNerProcessor(NerProcessor):
+
+    def get_labels(self):
+        return [
+            "X", "O", "[START]", "[END]",
+            "address", "book", "company", "game", "government", 
+            "movie", "name", "organization", "position","scene",
+        ]
+    
+    def _create_examples(self, data_dir, data_file, mode):
+        data_path = os.path.join(data_dir, data_file)
+        with open(data_path, encoding="utf-8") as f:
+            lines = [json.loads(line) for line in f.readlines()]
+            for sentence_counter, line in enumerate(lines):
+                text = line["text"]
+                label = line.get("label", None)
+                start_positions = end_positions = None
+                if label is not None:
+                    ner_tags = ["O"] * len(text)
+                    for entity_type, entities in line["label"].items():
+                        for entity_text, entity_positions in entities.items():
+                            for start_, end_ in entity_positions:
+                                assert text[start_: end_ + 1] == entity_text
+                                ner_tags[start_] = f"B-{entity_type}"
+                                ner_tags[start_ + 1: end_ + 1] = [f"I-{entity_type}"] * (end_ - start_)
+                    start_positions, end_positions = self.tags2se(ner_tags)
+                sentence = (
+                    sentence_counter,
+                    {
+                        "id": f"{mode}-{str(sentence_counter)}",
+                        "tokens": list(line["text"]),
+                        "start_positions": start_positions if mode in ["train", "dev"] else None,
+                        "end_positions": end_positions if mode in ["train", "dev"] else None,
+                    }
+                )
+                yield sentence
 
 class NerDataset(torch.utils.data.Dataset):
 
@@ -358,40 +399,90 @@ class NerDataset(torch.utils.data.Dataset):
     def __len__(self):
          return len(self.examples)
 
-def convert_example_to_feature(example, tokenizer, label2id, max_seq_length=256):
-    id_ = example[1]["id"]
-    tokens = example[1]["tokens"]
-    ner_tags = example[1]["ner_tags"]
+    @staticmethod
+    def collate_fn(batch):
+        max_len = max([b["input_len"] for b in batch])[0].item()
+        collated = dict()
+        for k in batch[0].keys():
+            if batch[0][k] is None:
+                collated[k] = None
+                continue
+            t = torch.cat([b[k] for b in batch], dim=0)
+            if k != "input_len":
+                t = t[:, :max_len]
+            collated[k] = t
+        return collated
 
-    # encode input
-    inputs = tokenizer.encode_plus(
-        text=tokens,
-        text_pair=None, 
-        add_special_tokens=True,
-        max_length=max_seq_length,
-        padding='max_length',
-        return_tensors='pt',
-    )
+class Example2Feature:
     
-    # encode label
-    label = ["O"] * max_seq_length
-    label[1: len(tokens) + 1] = ner_tags
-    label = [label2id[lb] for lb in label]
-    label = torch.tensor(label)[None]
-    inputs["label"] = label
-    inputs["input_len"] = torch.tensor([len(tokens) + 2])  # for special tokens
+    def __init__(self, tokenizer, label2id, max_seq_length=256):
+        self.tokenizer = tokenizer
+        self.label2id = label2id
+        self.max_seq_length = max_seq_length
+    
+    def __call__(self, example):
+        return self._convert_example_to_feature(example)
 
-    return inputs
-    
-def collate_fn(batch):
-    max_len = max([b["input_len"] for b in batch])[0].item()
-    collated = dict()
-    for k in batch[0].keys():
-        t = torch.cat([b[k] for b in batch], dim=0)
-        if k != "input_len":
-            t = t[:, :max_len]
-        collated[k] = t
-    return collated
+    def _encode_label(self, label, input_len):
+        label = label[:input_len - 2]
+        label = ["O"] + label + ["O"]
+        label = label + ["O"] * (self.max_seq_length - len(label))
+        label = [self.label2id[lb] for lb in label]
+        label = torch.tensor(label)[None]
+        return label
+
+    def _convert_example_to_feature(self, example):
+        id_ = example[1]["id"]
+        tokens = example[1]["tokens"]
+        start_positions = example[1]["start_positions"]
+        end_positions   = example[1]["end_positions"  ]
+
+        # encode input
+        inputs = self.tokenizer.encode_plus(
+            text=tokens,
+            text_pair=None, 
+            add_special_tokens=True,
+            padding="max_length",
+            truncation="longest_first",
+            max_length=self.max_seq_length,
+            is_split_into_words=True,
+            return_tensors="pt",
+        )
+        inputs["input_len"] = inputs["attention_mask"].sum(dim=1)  # for special tokens
+        
+        if start_positions is None and end_positions is None:
+            inputs["start_positions"] = None
+            inputs["end_positions"  ] = None
+            return inputs
+
+        # encode label
+        inputs["start_positions"] = self._encode_label(start_positions, inputs["input_len"])
+        inputs["end_positions"  ] = self._encode_label(end_positions  , inputs["input_len"])
+        return inputs
+
+class FGM():
+    def __init__(self, model, emb_name, epsilon=1.0):
+        # emb_name这个参数要换成你模型中embedding的参数名
+        self.model = model
+        self.epsilon = epsilon
+        self.emb_name = emb_name
+        self.backup = {}
+
+    def attack(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and self.emb_name in name:
+                self.backup[name] = param.data.clone()
+                norm = torch.norm(param.grad)
+                if norm != 0 and not torch.isnan(norm):
+                    r_at = self.epsilon * param.grad / norm
+                    param.data.add_(r_at)
+
+    def restore(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and self.emb_name in name:
+                assert name in self.backup
+                param.data = self.backup[name]
+        self.backup = {}
 
 def seed_everything(seed=None, reproducibility=True):
     '''
@@ -432,17 +523,20 @@ def init_logger(name, log_file='', log_file_level=logging.NOTSET):
         logger.addHandler(file_handler)
     return logger
 
-def train(args, train_dataset, model, processor, tokenizer):
+def train(args, model, processor, tokenizer):
     """ Train the model """
+    train_dataset = load_and_cache_examples(args, processor, tokenizer, data_type='train')
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size,
-                                  collate_fn=collate_fn)
+                                  collate_fn=NerDataset.collate_fn)
     if args.max_steps > 0:
         t_total = args.max_steps
         args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
     else:
         t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
+    if args.evaluate_each_epoch:
+        args.logging_steps = args.save_steps = int(t_total // args.num_train_epochs)
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ["bias", "LayerNorm.weight"]
     bert_param_optimizer = list(model.bert.named_parameters())
@@ -480,6 +574,8 @@ def train(args, train_dataset, model, processor, tokenizer):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
                                                           output_device=args.local_rank,
                                                           find_unused_parameters=True)
+    if args.do_fgm:
+        fgm = FGM(model, emb_name=args.fgm_name, epsilon=args.fgm_epsilon)
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
@@ -517,7 +613,7 @@ def train(args, train_dataset, model, processor, tokenizer):
                 steps_trained_in_current_epoch -= 1
                 continue
             model.train()
-            batch = {k: v.to(args.device) for k, v in batch.items()}
+            batch = {k: v.to(args.device) for k, v in batch.items() if v is not None}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
                 if args.model_type.split('_')[0] in ["bert", "xlnet"]:
@@ -534,7 +630,14 @@ def train(args, train_dataset, model, processor, tokenizer):
                     scaled_loss.backward()
             else:
                 loss.backward()
-            pbar.set_description(desc=f"Training... loss = {loss.item()}")
+            if args.do_fgm:
+                fgm.attack()
+                loss_adv = model(**batch)[0]
+                if args.n_gpu > 1:
+                    loss_adv = loss_adv.mean()
+                loss_adv.backward()
+                fgm.restore()
+            pbar.set_description(desc=f"Training... loss={loss.item():.6f}")
             tr_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if args.fp16:
@@ -545,29 +648,51 @@ def train(args, train_dataset, model, processor, tokenizer):
                 optimizer.step()
                 model.zero_grad()
                 global_step += 1
-                # TODO: save best
-                if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
+                if args.local_rank in [-1, 0] and args.evaluate_during_training and \
+                    args.logging_steps > 0 and global_step % args.logging_steps == 0:
                     # Log metrics
                     print(" ")
                     if args.local_rank == -1:
                         # Only evaluate when single GPU otherwise metrics may not average well
                         eval_results = evaluate(args, model, processor, tokenizer)
-                        if eval_results["micro avg"]["f1-score"] > best_f1:
-                            best_f1 = eval_results["micro avg"]["f1-score"]
-                            # Save model checkpoint
-                            output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
-                            if not os.path.exists(output_dir):
-                                os.makedirs(output_dir)
-                            model_to_save = (
-                                model.module if hasattr(model, "module") else model
-                            )  # Take care of distributed/parallel training
-                            model_to_save.save_pretrained(output_dir)
-                            args_to_json(os.path.join(output_dir, "training_args.json"), args)
-                            logger.info("Saving model checkpoint to %s", output_dir)
-                            tokenizer.save_vocabulary(output_dir)
-                            torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-                            torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-                            logger.info("Saving optimizer and scheduler states to %s", output_dir)
+                        logger.info(f"loss={eval_results.pop('loss')}")
+                        for entity, metrics in eval_results.items():
+                            logger.info("{:*^50s}".format(entity))
+                            logger.info("\t".join(f"{metric:s}={value:f}" 
+                                for metric, value in metrics.items()))
+                        if args.save_best_checkpoints:
+                            if eval_results["micro avg"]["f1-score"] > best_f1:
+                                best_f1 = eval_results["micro avg"]["f1-score"]
+                                # Save model checkpoint
+                                output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(999999))
+                                if not os.path.exists(output_dir):
+                                    os.makedirs(output_dir)
+                                model_to_save = (
+                                    model.module if hasattr(model, "module") else model
+                                )  # Take care of distributed/parallel training
+                                model_to_save.save_pretrained(output_dir)
+                                torch.save(args, os.path.join(output_dir, "training_args.json"))
+                                logger.info("Saving model checkpoint to %s", output_dir)
+                                tokenizer.save_vocabulary(output_dir)
+                                torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+                                torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+                                logger.info("Saving optimizer and scheduler states to %s", output_dir)
+                if args.local_rank in [-1, 0] and not args.save_best_checkpoints and \
+                    args.save_steps > 0 and global_step % args.save_steps == 0:
+                    # Save model checkpoint
+                    output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
+                    if not os.path.exists(output_dir):
+                        os.makedirs(output_dir)
+                    model_to_save = (
+                        model.module if hasattr(model, "module") else model
+                    )  # Take care of distributed/parallel training
+                    model_to_save.save_pretrained(output_dir)
+                    torch.save(args, os.path.join(output_dir, "training_args.json"))
+                    logger.info("Saving model checkpoint to %s", output_dir)
+                    tokenizer.save_vocabulary(output_dir)
+                    torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+                    torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+                    logger.info("Saving optimizer and scheduler states to %s", output_dir)
         logger.info("\n")
         if 'cuda' in str(args.device):
             torch.cuda.empty_cache()
@@ -582,7 +707,7 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
     # Note that DistributedSampler samples randomly
     eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(eval_dataset)
     eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size,
-                                 collate_fn=collate_fn)
+                                 collate_fn=NerDataset.collate_fn)
     # Eval!
     logger.info("***** Running evaluation %s *****", prefix)
     logger.info("  Num examples = %d", len(eval_dataset))
@@ -599,111 +724,92 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
     for step, batch in pbar:
         # forward step
         with torch.no_grad():
-            batch = {k: v.to(args.device) for k, v in batch.items()}
+            batch = {k: v.to(args.device) for k, v in batch.items() if v is not None}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
                 if args.model_type.split('_')[0] in ["bert", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
-            tmp_eval_loss, logits = outputs[:2]
-            tags = model.crf.decode(logits, batch['attention_mask'])
+            tmp_eval_loss, (start_logits, end_logits) = outputs[:2]
         if args.n_gpu > 1:
             tmp_eval_loss = tmp_eval_loss.mean()  # mean() to average on multi-gpu parallel evaluating
         eval_loss += tmp_eval_loss.item()
         nb_eval_steps += 1
-        input_lens = batch['input_len'].cpu().numpy().tolist()
-        labels = batch['label'].cpu().numpy().tolist()
-        preds = tags.squeeze(0).cpu().numpy().tolist()
-        for label, pred, input_len in zip(labels, preds, input_lens):
-            y_true.append([id2label[id_] for id_ in label[1: input_len - 1]])
-            y_pred.append([id2label[id_] for id_ in pred [1: input_len - 1]])
+        
+        # calculate metrics
+        preds = model.span.decode_logits_batch(
+            start_logits[:, 1:-1], end_logits[:, 1:-1])
+        for pred_no, (pred, input_len) in enumerate(zip(preds, batch["input_len"])):
+            pred = [(id2label[t], b, e) for t, b, e in pred if id2label[t] != "O"]
+            pred = processor.entities2tags(pred, input_len - 2)
+            y_pred.append(pred)
 
-    logger.info(classification_report(y_true, y_pred, digits=6, output_dict=False, scheme='IOB2'))
-    results = classification_report(y_true, y_pred, digits=6, output_dict=True, scheme='IOB2')
+        labels = model.span.decode_positions_batch(
+            batch["start_positions"][:, 1:-1], batch["end_positions"][:, 1:-1])
+        for label_no, (label, input_len) in enumerate(zip(labels, batch["input_len"])):
+            label = [(id2label[t], b, e) for t, b, e in label if id2label[t] != "O"]
+            label = processor.entities2tags(label, input_len - 2)
+            y_true.append(label)
+        
+    results = classification_report(y_true, y_pred, digits=6, output_dict=True, scheme=args.scheme)
     results['loss'] = eval_loss / nb_eval_steps
     return results
 
-def predict(args, model, tokenizer, prefix=""):
-    # TODO:
+def predict(args, model, processor, tokenizer, prefix=""):
     pred_output_dir = args.output_dir
-    # if not os.path.exists(pred_output_dir) and args.local_rank in [-1, 0]:
-    #     os.makedirs(pred_output_dir)
-    # test_dataset = load_and_cache_examples(args, args.task_name, tokenizer, data_type='test')
-    # # Note that DistributedSampler samples randomly
-    # test_sampler = SequentialSampler(test_dataset) if args.local_rank == -1 else DistributedSampler(test_dataset)
-    # test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=1, collate_fn=collate_fn)
-    # # Eval!
-    # logger.info("***** Running prediction %s *****", prefix)
-    # logger.info("  Num examples = %d", len(test_dataset))
-    # logger.info("  Batch size = %d", 1)
-    # results = []
-    # output_predict_file = os.path.join(pred_output_dir, prefix, "test_prediction.json")
-    # pbar = ProgressBar(n_total=len(test_dataloader), desc="Predicting")
+    if not os.path.exists(pred_output_dir) and args.local_rank in [-1, 0]:
+        os.makedirs(pred_output_dir)
+    test_dataset = load_and_cache_examples(args, processor, tokenizer, data_type='test')
+    # Note that DistributedSampler samples randomly
+    test_sampler = SequentialSampler(test_dataset) if args.local_rank == -1 else DistributedSampler(test_dataset)
+    test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=1, collate_fn=NerDataset.collate_fn)
+    id2label = processor.id2label
+    # Eval!
+    logger.info("***** Running prediction %s *****", prefix)
+    logger.info("  Num examples = %d", len(test_dataset))
+    logger.info("  Batch size = %d", 1)
+    results = []
+    output_predict_file = os.path.join(pred_output_dir, prefix, "test_prediction.json")
 
-    # if isinstance(model, nn.DataParallel):
-    #     model = model.module
-    # for step, batch in enumerate(test_dataloader):
-    #     model.eval()
-    #     with torch.no_grad():
-    #         batch = {k: v.to(args.device) for k, v in batch.items()}
-    #         if args.model_type != "distilbert":
-    #             # XLM and RoBERTa don"t use segment_ids
-    #             if args.model_type.split('_')[0] in ["bert", "xlnet"]:
-    #                 batch["token_type_ids"] = None
-    #         outputs = model(**batch)
-    #         logits = outputs[0]
-    #         tags = model.crf.decode(logits, batch['attention_mask'])
-    #         tags  = tags.squeeze(0).cpu().numpy().tolist()
-    #     preds = tags[0][1:-1]  # [CLS]XXXX[SEP]
-    #     label_entities = get_entities(preds, args.id2label, args.markup)
-    #     json_d = {}
-    #     json_d['id'] = step
-    #     json_d['tag_seq'] = " ".join([args.id2label[x] for x in preds])
-    #     json_d['entities'] = label_entities
-    #     results.append(json_d)
-    #     pbar(step)
-    # logger.info("\n")
-    # with open(output_predict_file, "w") as writer:
-    #     for record in results:
-    #         writer.write(json.dumps(record) + '\n')
-    # if args.task_name == 'cluener':
-    #     output_submit_file = os.path.join(pred_output_dir, prefix, "test_submit.json")
-    #     test_text = []
-    #     with open(os.path.join(args.data_dir,"test.json"), 'r') as fr:
-    #         for line in fr:
-    #             test_text.append(json.loads(line))
-    #     test_submit = []
-    #     for x, y in zip(test_text, results):
-    #         json_d = {}
-    #         json_d['id'] = x['id']
-    #         json_d['label'] = {}
-    #         entities = y['entities']
-    #         words = list(x['text'])
-    #         if len(entities) != 0:
-    #             for subject in entities:
-    #                 tag = subject[0]
-    #                 start = subject[1]
-    #                 end = subject[2]
-    #                 word = "".join(words[start:end + 1])
-    #                 if tag in json_d['label']:
-    #                     if word in json_d['label'][tag]:
-    #                         json_d['label'][tag][word].append([start, end])
-    #                     else:
-    #                         json_d['label'][tag][word] = [[start, end]]
-    #                 else:
-    #                     json_d['label'][tag] = {}
-    #                     json_d['label'][tag][word] = [[start, end]]
-    #         test_submit.append(json_d)
-    #     json_to_text(output_submit_file,test_submit)
+    if isinstance(model, nn.DataParallel):
+        model = model.module
+    pbar = tqdm(enumerate(test_dataloader), total=len(test_dataloader), desc="Predicting...")
+    for step, batch in pbar:
+        model.eval()
+        with torch.no_grad():
+            batch = {k: v.to(args.device) for k, v in batch.items() if v is not None}
+            if args.model_type != "distilbert":
+                # XLM and RoBERTa don"t use segment_ids
+                if args.model_type.split('_')[0] in ["bert", "xlnet"]:
+                    batch["token_type_ids"] = None
+            outputs = model(**batch)
+            (start_logits, end_logits) = outputs[0]
+
+        preds = model.span.decode_logits_batch(
+            start_logits[:, 1:-1], end_logits[:, 1:-1])
+        pred, input_len = preds[0], batch["input_len"][0]
+        pred = [(id2label[t], b, e) for t, b, e in pred if id2label[t] != "O"]
+        pred = processor.entities2tags(pred, input_len - 2)
+        results.append({
+            "id": step,
+            "tag_seq": " ".join(pred),
+            "entities": get_entities(pred)
+        })
+    
+    logger.info("\n")
+    with open(output_predict_file, "w") as writer:
+        for record in results:
+            writer.write(json.dumps(record) + '\n')
 
 PROCESSER_CLASS = {
     "msra_ner": MsraNerProcessor,
     "peoples_daily_ner": PeoplesDailyNerProcessor,
     "weibo_ner": WeiboNerProcessor,
+    "clue_ner": ClueNerProcessor,
 }
 
 MODEL_CLASSES = {
-    "bert_crf": (BertConfig, BertCrfForNer, BertTokenizer),
+    "bert_span": (BertConfig, BertSpanForNer, BertTokenizer),
 }
 
 def load_and_cache_examples(args, processor, tokenizer, data_type='train'):
@@ -718,22 +824,23 @@ def load_and_cache_examples(args, processor, tokenizer, data_type='train'):
     if args.local_rank == 0 and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
     return NerDataset(examples, process_pipline=[
-        lambda x: convert_example_to_feature(x, tokenizer, processor.label2id)
+        Example2Feature(tokenizer, processor.label2id),
     ])
 
 
 if __name__ == "__main__":
 
-    parser = NerArgumentParser().build_arguments()
+    parser = NerArgumentParser()
     # if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
     #     # If we pass only one argument to the script and it's the path to a json file,
     #     # let's parse it to get our arguments.
     #     args = parser.parse_args_from_json(json_file=os.path.abspath(sys.argv[1]))
     # else:
     #     args = parser.build_arguments().parse_args()
-    # args = parser.parse_args()
-    # parser.save_args_to_json("config/bert_crf.json", args)
-    args = parser.parse_args_from_json(json_file="config/bert_crf.json")
+    # args = parser.parse_args_from_json(json_file="args/bert_span-weibo_ner.json")
+    # args = parser.parse_args_from_json(json_file="args/bert_span-peoples_daily_ner.json")
+    # args = parser.parse_args_from_json(json_file="args/bert_span-msra_ner.json")
+    args = parser.parse_args_from_json(json_file="args/bert_span-clue_ner.json")
 
     # Set seed before initializing model.
     seed_everything(args.seed)
@@ -744,6 +851,7 @@ if __name__ == "__main__":
     args.logging_dir = args.output_dir
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.cache_dir, exist_ok=True)
+    parser.save_args_to_json(os.path.join(args.output_dir, "training_args.json"), args)
 
     # Setup logging
     time_ = time.strftime("%Y-%m-%d-%H:%M:%S", time.localtime())
@@ -804,8 +912,7 @@ if __name__ == "__main__":
     logger.info("Training/evaluation parameters %s", args)
     # Training
     if args.do_train:
-        train_dataset = load_and_cache_examples(args, processor, tokenizer, data_type='train')
-        global_step, tr_loss = train(args, train_dataset, model, processor, tokenizer)
+        global_step, tr_loss = train(args, model, processor, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
     # Saving best-practices: if you use defaults names for the model, you can reload it using from_pretrained()
     if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
@@ -838,7 +945,7 @@ if __name__ == "__main__":
             prefix = checkpoint.split('/')[-1] if checkpoint.find('checkpoint') != -1 else ""
             model = model_class.from_pretrained(checkpoint, config=config)
             model.to(args.device)
-            result = evaluate(args, model, tokenizer, prefix=prefix)
+            result = evaluate(args, model, processor, tokenizer, prefix=prefix)
             if global_step:
                 result = {"{}_{}".format(global_step, k): v for k, v in result.items()}
             results.update(result)
@@ -860,6 +967,6 @@ if __name__ == "__main__":
             prefix = checkpoint.split('/')[-1] if checkpoint.find('checkpoint') != -1 else ""
             model = model_class.from_pretrained(checkpoint, config=config)
             model.to(args.device)
-            predict(args, model, tokenizer, prefix=prefix)
+            predict(args, model, processor, tokenizer, prefix=prefix)
 
 

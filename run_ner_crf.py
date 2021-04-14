@@ -27,7 +27,6 @@ from transformers import (
 from models.bert_for_ner import BertCrfForNer
 
 # trainer & training arguments
-from transformers import HfArgumentParser
 from transformers import AdamW, get_linear_schedule_with_warmup
 
 # metrics
@@ -402,6 +401,14 @@ class Example2Feature:
     def __call__(self, example):
         return self._convert_example_to_feature(example)
 
+    def _encode_label(self, label, input_len):
+        label = label[:input_len - 2]
+        label = ["O"] + label + ["O"]
+        label = label + ["O"] * (self.max_seq_length - len(label))
+        label = [self.label2id[lb] for lb in label]
+        label = torch.tensor(label)[None]
+        return label
+
     def _convert_example_to_feature(self, example):
         id_ = example[1]["id"]
         tokens = example[1]["tokens"]
@@ -425,11 +432,7 @@ class Example2Feature:
             return inputs
 
         # encode label
-        ner_tags = ner_tags[:inputs["input_len"] - 2]
-        ner_tags = ["O"] + ner_tags + ["O"]
-        ner_tags = ner_tags + ["O"] * (self.max_seq_length - len(ner_tags))
-        label = [self.label2id[lb] for lb in ner_tags]
-        inputs["label"] = torch.tensor(label)[None]
+        inputs["label"] = self._encode_label(ner_tags, inputs["input_len"])
         return inputs
 
 class FGM():
