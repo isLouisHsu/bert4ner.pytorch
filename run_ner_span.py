@@ -831,16 +831,13 @@ def load_and_cache_examples(args, processor, tokenizer, data_type='train'):
 if __name__ == "__main__":
 
     parser = NerArgumentParser()
-    # if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-    #     # If we pass only one argument to the script and it's the path to a json file,
-    #     # let's parse it to get our arguments.
-    #     args = parser.parse_args_from_json(json_file=os.path.abspath(sys.argv[1]))
-    # else:
-    #     args = parser.build_arguments().parse_args()
-    # args = parser.parse_args_from_json(json_file="args/bert_span-weibo_ner.json")
-    # args = parser.parse_args_from_json(json_file="args/bert_span-peoples_daily_ner.json")
-    # args = parser.parse_args_from_json(json_file="args/bert_span-msra_ner.json")
-    args = parser.parse_args_from_json(json_file="args/bert_span-clue_ner.json")
+    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+        # If we pass only one argument to the script and it's the path to a json file,
+        # let's parse it to get our arguments.
+        args = parser.parse_args_from_json(json_file=os.path.abspath(sys.argv[1]))
+    else:
+        args = parser.build_arguments().parse_args()
+    # args = parser.parse_args_from_json(json_file="args/bert_span-clue_ner.json")
 
     # Set seed before initializing model.
     seed_everything(args.seed)
