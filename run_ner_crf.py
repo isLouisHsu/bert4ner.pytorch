@@ -500,7 +500,7 @@ def init_logger(name, log_file='', log_file_level=logging.NOTSET):
 
 def train(args, model, processor, tokenizer):
     """ Train the model """
-    train_dataset = load_and_cache_examples(args, processor, tokenizer, data_type='train')
+    train_dataset = load_dataset(args, processor, tokenizer, data_type='train')
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size,
@@ -677,7 +677,7 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
     eval_output_dir = args.output_dir
     if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(eval_output_dir)
-    eval_dataset = load_and_cache_examples(args, processor, tokenizer, data_type='dev')
+    eval_dataset = load_dataset(args, processor, tokenizer, data_type='dev')
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     # Note that DistributedSampler samples randomly
     eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(eval_dataset)
@@ -727,7 +727,7 @@ def predict(args, model, processor, tokenizer, prefix=""):
     pred_output_dir = args.output_dir
     if not os.path.exists(pred_output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(pred_output_dir)
-    test_dataset = load_and_cache_examples(args, processor, tokenizer, data_type='test')
+    test_dataset = load_dataset(args, processor, tokenizer, data_type='test')
     # Note that DistributedSampler samples randomly
     test_sampler = SequentialSampler(test_dataset) if args.local_rank == -1 else DistributedSampler(test_dataset)
     test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=1, collate_fn=NerDataset.collate_fn)
@@ -776,7 +776,7 @@ MODEL_CLASSES = {
     "bert_crf": (BertConfig, BertCrfForNer, BertTokenizer),
 }
 
-def load_and_cache_examples(args, processor, tokenizer, data_type='train'):
+def load_dataset(args, processor, tokenizer, data_type='train'):
     if args.local_rank not in [-1, 0] and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
     if data_type == 'train':
