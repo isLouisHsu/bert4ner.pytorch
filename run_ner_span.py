@@ -616,7 +616,7 @@ def train(args, model, processor, tokenizer):
             batch = {k: v.to(args.device) for k, v in batch.items() if v is not None}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
-                if args.model_type.split('_')[0] in ["bert", "xlnet"]:
+                if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
 
             outputs = model(**batch)
@@ -727,7 +727,7 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
             batch = {k: v.to(args.device) for k, v in batch.items() if v is not None}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
-                if args.model_type.split('_')[0] in ["bert", "xlnet"]:
+                if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
             tmp_eval_loss, (start_logits, end_logits) = outputs[:2]
@@ -780,7 +780,7 @@ def predict(args, model, processor, tokenizer, prefix=""):
             batch = {k: v.to(args.device) for k, v in batch.items() if v is not None}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
-                if args.model_type.split('_')[0] in ["bert", "xlnet"]:
+                if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
             (start_logits, end_logits) = outputs[0]

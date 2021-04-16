@@ -24,7 +24,7 @@ from transformers import (
     BertConfig, 
     BertTokenizer,
 )
-from models.bert_for_ner import BertCrfForNer
+from models.bert_for_ner import BertSsdForNer
 
 # trainer & training arguments
 from transformers import AdamW, get_linear_schedule_with_warmup
@@ -37,6 +37,15 @@ from seqeval.metrics.sequence_labeling import (
     f1_score, precision_score, recall_score,
     get_entities
 )
+
+class BertConfigSsd(BertConfig):
+
+    def __init__(self, anchor_size=None, iou_thresh_pos=None, 
+            iou_thresh_neg=None, **kwargs):
+        super().__init__(**kwargs)
+        self.anchor_size = anchor_size
+        self.iou_thresh_pos = iou_thresh_pos
+        self.iou_thresh_neg = iou_thresh_neg
 
 class NerArgumentParser(ArgumentParser):
 
@@ -74,6 +83,13 @@ class NerArgumentParser(ArgumentParser):
                             help="Path to pre-trained model or shortcut name selected in the list: " )
         self.add_argument("--output_dir", default=None, type=str, required=True,
                             help="The output directory where the model predictions and checkpoints will be written.", )
+        
+        self.add_argument("--anchor_size", default=[1, 3, 5, 7], type=int, nargs="+",
+                            help="Anchor setting for SSD.")
+        self.add_argument("--iou_thresh_pos", default=0.6, type=float,
+                            help="Threshold for matching positive anchors.")
+        self.add_argument("--iou_thresh_neg", default=0.3, type=float,
+                            help="Threshold for matching negative anchors.")
 
         # Other parameters
         self.add_argument('--scheme', default='IOB2', type=str,
@@ -183,18 +199,32 @@ class NerProcessor(DataProcessor):
     
     def _create_examples(self, data_dir, data_file, mode):
         raise NotImplementedError()
+    
+    def tags2se(self, ner_tags):
+        entities = get_entities(ner_tags)
+        start_positions = ["O"] * len(ner_tags)
+        end_positions   = ["O"] * len(ner_tags)
+        for t, s, e in entities:
+            start_positions[s] = t
+            end_positions[e] = t
+        return start_positions, end_positions
+    
+    def entities2tags(self, entities, seq_len):
+        ner_tags = ["O"] * seq_len
+        for t, s, e in entities:
+            if s >= seq_len or e >= seq_len:
+                continue
+            ner_tags[s] = f"B-{t}"
+            for i in range(s + 1, e + 1):
+                ner_tags[i] = f"I-{t}"
+        return ner_tags
 
 class MsraNerProcessor(NerProcessor):
 
     def get_labels(self):
         return [
             "X", "O", "[START]", "[END]",
-            "B-PER",
-            "I-PER",
-            "B-ORG",
-            "I-ORG",
-            "B-LOC",
-            "I-LOC",
+            "PER", "ORG", "LOC",
         ]
     
     def _create_examples(self, data_dir, data_file, mode):
@@ -207,10 +237,11 @@ class MsraNerProcessor(NerProcessor):
                 line_stripped = line.strip()
                 if line_stripped == "":
                     if tokens:
+                        entities = get_entities(ner_tags)
                         yield guid, {
                             "id": f"{mode}-{str(guid)}",
                             "tokens": tokens,
-                            "ner_tags": ner_tags if mode in ["train", "dev"] else None,
+                            "entities": entities if mode in ["train", "dev"] else None,
                         }
                         guid += 1
                         tokens = []
@@ -222,10 +253,11 @@ class MsraNerProcessor(NerProcessor):
                     tokens.append(splits[0])
                     ner_tags.append(splits[1])
             # last example
+            entities = get_entities(ner_tags)
             yield guid, {
                 "id": f"{mode}-{str(guid)}",
                 "tokens": tokens,
-                "ner_tags": ner_tags if mode in ["train", "dev"] else None,
+                "entities": entities if mode in ["train", "dev"] else None,
             }
 
 class PeoplesDailyNerProcessor(NerProcessor):
@@ -233,8 +265,7 @@ class PeoplesDailyNerProcessor(NerProcessor):
     def get_labels(self):
         return [
             "X", "O", "[START]", "[END]",
-            "B-PER", "B-ORG", "B-LOC",
-            "I-PER", "I-ORG", "I-LOC",
+            "PER", "ORG", "LOC",
         ]
     
     def _create_examples(self, data_dir, data_file, mode):
@@ -247,10 +278,11 @@ class PeoplesDailyNerProcessor(NerProcessor):
                 line_stripped = line.strip()
                 if line_stripped == "":
                     if tokens:
+                        entities = get_entities(ner_tags)
                         yield guid, {
                             "id": f"{mode}-{str(guid)}",
                             "tokens": tokens,
-                            "ner_tags": ner_tags if mode in ["train", "dev"] else None,
+                            "entities": entities if mode in ["train", "dev"] else None,
                         }
                         guid += 1
                         tokens = []
@@ -262,10 +294,11 @@ class PeoplesDailyNerProcessor(NerProcessor):
                     tokens.append(splits[0])
                     ner_tags.append(splits[1])
             # last example
+            entities = get_entities(ner_tags)
             yield guid, {
                 "id": f"{mode}-{str(guid)}",
                 "tokens": tokens,
-                "ner_tags": ner_tags if mode in ["train", "dev"] else None,
+                "entities": entities if mode in ["train", "dev"] else None,
             }
 
 class WeiboNerProcessor(NerProcessor):
@@ -273,8 +306,7 @@ class WeiboNerProcessor(NerProcessor):
     def get_labels(self):
         return [
             "X", "O", "[START]", "[END]",
-            "B-GPE.NAM", "B-GPE.NOM", "B-LOC.NAM", "B-LOC.NOM", "B-ORG.NAM", "B-ORG.NOM", "B-PER.NAM", "B-PER.NOM",
-            "I-GPE.NAM", "I-GPE.NOM", "I-LOC.NAM", "I-LOC.NOM", "I-ORG.NAM", "I-ORG.NOM", "I-PER.NAM", "I-PER.NOM",
+            "GPE.NAM", "GPE.NOM", "LOC.NAM", "LOC.NOM", "ORG.NAM", "ORG.NOM", "PER.NAM", "PER.NOM",
         ]
     
     def _create_examples(self, data_dir, data_file, mode):
@@ -294,12 +326,13 @@ class WeiboNerProcessor(NerProcessor):
                     if not current_words:
                         continue
                     assert len(current_words) == len(ner_tags), "word len doesnt match label length"
+                    entities = get_entities(ner_tags)
                     sentence = (
                         sentence_counter,
                         {
                             "id": f"{mode}-{str(sentence_counter)}",
                             "tokens": current_words,
-                            "ner_tags": ner_tags if mode in ["train", "dev"] else None,
+                            "entities": entities if mode in ["train", "dev"] else None,
                         },
                     )
                     sentence_counter += 1
@@ -309,12 +342,13 @@ class WeiboNerProcessor(NerProcessor):
 
             # if something remains:
             if current_words:
+                entities = get_entities(ner_tags)
                 sentence = (
                     sentence_counter,
                     {
                         "id": f"{mode}-{str(sentence_counter)}",
                         "tokens": current_words,
-                        "ner_tags": ner_tags if mode in ["train", "dev"] else None,
+                        "entities": entities if mode in ["train", "dev"] else None,
                     },
                 )
                 yield sentence
@@ -324,10 +358,9 @@ class ClueNerProcessor(NerProcessor):
     def get_labels(self):
         return [
             "X", "O", "[START]", "[END]",
-            "B-address", "B-book", "B-company", 'B-game', 'B-government', 'B-movie', 'B-name',
-            'B-organization', 'B-position','B-scene',
-            "I-address", "I-book", "I-company", 'I-game', 'I-government', 'I-movie', 'I-name',
-            'I-organization', 'I-position','I-scene']
+            "address", "book", "company", "game", "government", 
+            "movie", "name", "organization", "position","scene",
+        ]
     
     def _create_examples(self, data_dir, data_file, mode):
         data_path = os.path.join(data_dir, data_file)
@@ -336,6 +369,7 @@ class ClueNerProcessor(NerProcessor):
             for sentence_counter, line in enumerate(lines):
                 text = line["text"]
                 label = line.get("label", None)
+                entities = []
                 if label is not None:
                     ner_tags = ["O"] * len(text)
                     for entity_type, entities in line["label"].items():
@@ -344,12 +378,13 @@ class ClueNerProcessor(NerProcessor):
                                 assert text[start_: end_ + 1] == entity_text
                                 ner_tags[start_] = f"B-{entity_type}"
                                 ner_tags[start_ + 1: end_ + 1] = [f"I-{entity_type}"] * (end_ - start_)
+                    entities = get_entities(ner_tags)
                 sentence = (
                     sentence_counter,
                     {
                         "id": f"{mode}-{str(sentence_counter)}",
                         "tokens": list(line["text"]),
-                        "ner_tags": ner_tags if mode in ["train", "dev"] else None,
+                        "entities": entities if mode in ["train", "dev"] else [],
                     }
                 )
                 yield sentence
@@ -381,15 +416,12 @@ class NerDataset(torch.utils.data.Dataset):
             if batch[0][k] is None:
                 collated[k] = None
                 continue
-            t = torch.cat([b[k] for b in batch], dim=0)
-            if k != "input_len":
+            t = torch.cat([b[k] if k != "index" else b[k] * no \
+                for no, b in enumerate(batch)], dim=0)
+            if k not in ["input_len", "label", "index"]:
                 t = t[:, :max_len]
             collated[k] = t
         return collated
-
-class IOB2IOBES:
-    def __call__(self, example):
-        ... # TODO:
 
 class Example2Feature:
     
@@ -401,18 +433,17 @@ class Example2Feature:
     def __call__(self, example):
         return self._convert_example_to_feature(example)
 
-    def _encode_label(self, label, input_len):
-        label = label[:input_len - 2]   # truncation
-        label = ["O"] + label + ["O"]
-        label = label + ["O"] * (self.max_seq_length - len(label))
-        label = [self.label2id[lb] for lb in label]
-        label = torch.tensor(label)[None]
+    def _encode_label(self, entities, input_len):
+        truncat_len = input_len - 2
+        label = [[self.label2id[t], b, e] for t, b, e in entities \
+            if b < truncat_len and e < truncat_len]
+        label = torch.tensor(label)     # (n_entities, 3)
         return label
 
     def _convert_example_to_feature(self, example):
         id_ = example[1]["id"]
         tokens = example[1]["tokens"]
-        ner_tags = example[1]["ner_tags"]
+        entities = example[1]["entities"]
 
         # encode input
         inputs = self.tokenizer.encode_plus(
@@ -427,12 +458,13 @@ class Example2Feature:
         )
         inputs["input_len"] = inputs["attention_mask"].sum(dim=1)  # for special tokens
         
-        if ner_tags is None:
+        if len(entities) == 0:
             inputs["label"] = None
             return inputs
 
         # encode label
-        inputs["label"] = self._encode_label(ner_tags, inputs["input_len"])
+        inputs["label"] = self._encode_label(entities, inputs["input_len"])
+        inputs["index"] = torch.ones(inputs["label"].size(0), dtype=torch.int)
         return inputs
 
 class FGM():
@@ -705,20 +737,27 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
                 if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
-            tmp_eval_loss, logits = outputs[:2]
-            tags = model.crf.decode(logits, batch['attention_mask'])
+            tmp_eval_loss, (start_logits, end_logits) = outputs[:2]
         if args.n_gpu > 1:
             tmp_eval_loss = tmp_eval_loss.mean()  # mean() to average on multi-gpu parallel evaluating
         eval_loss += tmp_eval_loss.item()
         nb_eval_steps += 1
         
         # calculate metrics
-        labels = batch['label'].cpu().numpy().tolist()
-        preds = tags.squeeze(0).cpu().numpy().tolist()
-        for label, pred in zip(labels, preds):
-            y_true.append([id2label[id_] for id_ in label[1: - 1]])
-            y_pred.append([id2label[id_] for id_ in pred [1: - 1]])
+        preds = model.ssd.decode_logits_batch(
+            start_logits[:, 1:-1], end_logits[:, 1:-1])
+        for pred_no, (pred, input_len) in enumerate(zip(preds, batch["input_len"])):
+            pred = [(id2label[t], b, e) for t, b, e in pred if id2label[t] != "O"]
+            pred = processor.entities2tags(pred, input_len - 2)
+            y_pred.append(pred)
 
+        labels = model.ssd.decode_positions_batch(
+            batch["start_positions"][:, 1:-1], batch["end_positions"][:, 1:-1])
+        for label_no, (label, input_len) in enumerate(zip(labels, batch["input_len"])):
+            label = [(id2label[t], b, e) for t, b, e in label if id2label[t] != "O"]
+            label = processor.entities2tags(label, input_len - 2)
+            y_true.append(label)
+        
     results = classification_report(y_true, y_pred, digits=6, output_dict=True, scheme=args.scheme)
     results['loss'] = eval_loss / nb_eval_steps
     return results
@@ -751,15 +790,19 @@ def predict(args, model, processor, tokenizer, prefix=""):
                 if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
-            logits = outputs[0]
-            tags = model.crf.decode(logits, batch['attention_mask'])
-            tags  = tags.squeeze(0).cpu().numpy().tolist()
-        preds = [id2label[t] for t in tags[0][1:-1]]  # [CLS]XXXX[SEP]
+            (start_logits, end_logits) = outputs[0]
+
+        preds = model.ssd.decode_logits_batch(
+            start_logits[:, 1:-1], end_logits[:, 1:-1])
+        pred, input_len = preds[0], batch["input_len"][0]
+        pred = [(id2label[t], b, e) for t, b, e in pred if id2label[t] != "O"]
+        pred = processor.entities2tags(pred, input_len - 2)
         results.append({
             "id": step,
-            "tag_seq": " ".join(preds),
-            "entities": get_entities(preds)
+            "tag_seq": " ".join(pred),
+            "entities": get_entities(pred)
         })
+    
     logger.info("\n")
     with open(output_predict_file, "w") as writer:
         for record in results:
@@ -773,7 +816,7 @@ PROCESSER_CLASS = {
 }
 
 MODEL_CLASSES = {
-    "bert_crf": (BertConfig, BertCrfForNer, BertTokenizer),
+    "bert_ssd": (BertConfigSsd, BertSsdForNer, BertTokenizer),
 }
 
 def load_dataset(args, processor, tokenizer, data_type='train'):
@@ -795,16 +838,13 @@ def load_dataset(args, processor, tokenizer, data_type='train'):
 if __name__ == "__main__":
 
     parser = NerArgumentParser()
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        # If we pass only one argument to the script and it's the path to a json file,
-        # let's parse it to get our arguments.
-        args = parser.parse_args_from_json(json_file=os.path.abspath(sys.argv[1]))
-    else:
-        args = parser.build_arguments().parse_args()
-    # args = parser.parse_args_from_json(json_file="args/bert_crf-weibo_ner.json")
-    # args = parser.parse_args_from_json(json_file="args/bert_crf-peoples_daily_ner.json")
-    # args = parser.parse_args_from_json(json_file="args/bert_crf-msra_ner.json")
-    # args = parser.parse_args_from_json(json_file="args/bert_crf-clue_ner.json")
+    # if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+    #     # If we pass only one argument to the script and it's the path to a json file,
+    #     # let's parse it to get our arguments.
+    #     args = parser.parse_args_from_json(json_file=os.path.abspath(sys.argv[1]))
+    # else:
+    #     args = parser.build_arguments().parse_args()
+    args = parser.parse_args_from_json(json_file="args/bert_ssd-clue_ner.json")
 
     # Set seed before initializing model.
     seed_everything(args.seed)
@@ -863,7 +903,9 @@ if __name__ == "__main__":
     args.model_type = args.model_type.lower()
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                                          num_labels=num_labels, cache_dir=args.cache_dir if args.cache_dir else None, )
+                                          num_labels=num_labels, anchor_size=args.anchor_size, 
+                                          iou_thresh_pos=args.iou_thresh_pos, iou_thresh_neg=args.iou_thresh_neg, 
+                                          cache_dir=args.cache_dir if args.cache_dir else None, )
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                                                 do_lower_case=args.do_lower_case,
                                                 cache_dir=args.cache_dir if args.cache_dir else None, )
