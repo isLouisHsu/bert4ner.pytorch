@@ -5,7 +5,7 @@ from transformers import BertPreTrainedModel, BertModel
 from transformers.modeling_outputs import TokenClassifierOutput
 from modules.crf import CRF
 from modules.span import Span, SpanLoss
-from modules.ssd import SSD, SSDLoss
+from modules.ssd import SSD, SSDLoss, decode
 
 class BertCrfForNer(BertPreTrainedModel):
 
@@ -136,8 +136,11 @@ class BertSsdForNer(BertPreTrainedModel):
         self.bert = BertModel(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.ssd = SSD(config.hidden_size, config.num_labels,
-            config.max_position_embeddings, config.anchor_size, 
-            config.iou_thresh_pos, config.iou_thresh_neg)
+            config.max_position_embeddings, config.anchor_size,
+            conf_thresh=config.conf_thresh, 
+            nms_thresh=config.nms_thresh, 
+            tag_o=config.tag_o
+        )
         self.init_weights()
 
     def forward(
@@ -171,22 +174,31 @@ class BertSsdForNer(BertPreTrainedModel):
 
         sequence_output = outputs[0]
         sequence_output = self.dropout(sequence_output)
-        cls_output, reg_output = self.ssd(sequence_output)
+        conf_logits, cls_logits, reg_logits = self.ssd(sequence_output)
 
-        total_loss = None
+        total_loss = conf_loss = cls_loss = reg_loss = None
         if label is not None and index is not None:
-            loss_fct = SSDLoss()
-            total_loss, cls_loss, reg_loss = loss_fct(input_len,
-                cls_output, reg_output, label, index, self.ssd.anchors, 
-                self.ssd.iou_thresh_pos, self.ssd.iou_thresh_neg)
+            loss_fct = SSDLoss(
+                weight_conf=self.config.weight_conf, 
+                weight_cls=self.config.weight_cls, 
+                weight_reg=self.config.weight_reg, 
+                tag_o=self.config.tag_o, 
+            )
+            total_loss, conf_loss, cls_loss, reg_loss = loss_fct(
+                input_len, conf_logits, cls_logits, reg_logits, 
+                label, index, self.ssd.anchors, 
+                self.config.iou_thresh_pos, 
+                self.config.iou_thresh_neg,
+            )
 
         if not return_dict:
-            output = (cls_output, reg_output,) + outputs[2:]
-            return ((total_loss,) + output) if total_loss is not None else output
+            output = (conf_logits, cls_logits, reg_logits,) + outputs[2:]
+            return ((total_loss, conf_loss, cls_loss, reg_loss,) + output) if total_loss is not None else output
 
         return TokenClassifierOutput(
-            loss=total_loss,
-            logits=(cls_output, reg_output,),
+            loss=(total_loss, conf_loss, cls_loss, reg_loss,),
+            logits=(conf_logits, cls_logits, reg_logits,),
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+    

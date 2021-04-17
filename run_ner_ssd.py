@@ -40,12 +40,28 @@ from seqeval.metrics.sequence_labeling import (
 
 class BertConfigSsd(BertConfig):
 
-    def __init__(self, anchor_size=None, iou_thresh_pos=None, 
-            iou_thresh_neg=None, **kwargs):
+    def __init__(self, 
+        anchor_size=[1, 3, 5, 7], 
+        iou_thresh_pos=0.6, 
+        iou_thresh_neg=0.3, 
+        weight_conf=1.0, 
+        weight_cls=1.0, 
+        weight_reg=1.0,
+        conf_thresh=0.7,
+        nms_thresh=0.7, 
+        tag_o=1, 
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.anchor_size = anchor_size
         self.iou_thresh_pos = iou_thresh_pos
         self.iou_thresh_neg = iou_thresh_neg
+        self.weight_conf = weight_conf
+        self.weight_cls = weight_cls
+        self.weight_reg = weight_reg
+        self.conf_thresh = conf_thresh
+        self.nms_thresh = nms_thresh
+        self.tag_o = tag_o
 
 class NerArgumentParser(ArgumentParser):
 
@@ -90,7 +106,17 @@ class NerArgumentParser(ArgumentParser):
                             help="Threshold for matching positive anchors.")
         self.add_argument("--iou_thresh_neg", default=0.3, type=float,
                             help="Threshold for matching negative anchors.")
-
+        self.add_argument("--weight_conf", default=1.0, type=float,
+                            help="Weight for confidence loss for training")
+        self.add_argument("--weight_cls", default=1.0, type=float,
+                            help="Weight for classification loss for training")
+        self.add_argument("--weight_reg", default=1.0, type=float,
+                            help="Weight for regression loss for training")
+        self.add_argument("--conf_thresh", default=0.7, type=float,
+                            help="Confidence threshold for interfering")
+        self.add_argument("--nms_thresh", default=0.6, type=float,
+                            help="Non-maximun uppression threshold for interfering")
+        
         # Other parameters
         self.add_argument('--scheme', default='IOB2', type=str,
                             choices=['IOB2', 'IOBES'])
@@ -199,15 +225,6 @@ class NerProcessor(DataProcessor):
     
     def _create_examples(self, data_dir, data_file, mode):
         raise NotImplementedError()
-    
-    def tags2se(self, ner_tags):
-        entities = get_entities(ner_tags)
-        start_positions = ["O"] * len(ner_tags)
-        end_positions   = ["O"] * len(ner_tags)
-        for t, s, e in entities:
-            start_positions[s] = t
-            end_positions[e] = t
-        return start_positions, end_positions
     
     def entities2tags(self, entities, seq_len):
         ner_tags = ["O"] * seq_len
@@ -435,8 +452,8 @@ class Example2Feature:
 
     def _encode_label(self, entities, input_len):
         truncat_len = input_len - 2
-        label = [[self.label2id[t], b, e] for t, b, e in entities \
-            if b < truncat_len and e < truncat_len]
+        label = [[self.label2id[t], (b + 1) - 0.5, (e + 1) + 0.5] for t, b, e in entities \
+            if b < truncat_len and e < truncat_len] # `+1` for [CLS]
         label = torch.tensor(label)     # (n_entities, 3)
         return label
 
@@ -627,7 +644,7 @@ def train(args, model, processor, tokenizer):
                     batch["token_type_ids"] = None
 
             outputs = model(**batch)
-            loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
+            loss, conf_loss, cls_loss, reg_loss = outputs['loss']  # model outputs are always tuple in pytorch-transformers (see doc)
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
             if args.gradient_accumulation_steps > 1:
@@ -644,7 +661,7 @@ def train(args, model, processor, tokenizer):
                     loss_adv = loss_adv.mean()
                 loss_adv.backward()
                 fgm.restore()
-            pbar.set_description(desc=f"Training... loss={loss.item():.6f}")
+            pbar.set_description(desc=f"Training... loss={loss.item():.6f} conf={conf_loss.item():.6f} cls={cls_loss.item():.6f} reg={reg_loss.item():.6f}")
             tr_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if args.fp16:
@@ -737,25 +754,41 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
                 if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
-            tmp_eval_loss, (start_logits, end_logits) = outputs[:2]
+            tmp_eval_loss, conf_loss, cls_loss, reg_loss = outputs['loss']
+            conf_logits, cls_logits, reg_logits = outputs['logits']
         if args.n_gpu > 1:
             tmp_eval_loss = tmp_eval_loss.mean()  # mean() to average on multi-gpu parallel evaluating
         eval_loss += tmp_eval_loss.item()
         nb_eval_steps += 1
         
         # calculate metrics
-        preds = model.ssd.decode_logits_batch(
-            start_logits[:, 1:-1], end_logits[:, 1:-1])
-        for pred_no, (pred, input_len) in enumerate(zip(preds, batch["input_len"])):
-            pred = [(id2label[t], b, e) for t, b, e in pred if id2label[t] != "O"]
-            pred = processor.entities2tags(pred, input_len - 2)
+        dets, tags, index = model.ssd.decode(
+            batch["input_len"], conf_logits, cls_logits, reg_logits)
+        for pred_no, input_len in enumerate(batch["input_len"]):
+            pred_mask = index == pred_no
+            if pred_mask.sum() == 0:
+                pred = ["O"] * (input_len - 2)
+            else:
+                pred = [[
+                    args.id2label[tag.item()], 
+                    round(det[0].item() + 0.5) - 1, 
+                    round(det[1].item() - 0.5) - 1
+                ] for det, tag in zip(dets[pred_mask], tags[pred_mask])]
+                pred = processor.entities2tags(pred, input_len - 2)
             y_pred.append(pred)
 
-        labels = model.ssd.decode_positions_batch(
-            batch["start_positions"][:, 1:-1], batch["end_positions"][:, 1:-1])
-        for label_no, (label, input_len) in enumerate(zip(labels, batch["input_len"])):
-            label = [(id2label[t], b, e) for t, b, e in label if id2label[t] != "O"]
-            label = processor.entities2tags(label, input_len - 2)
+            label_mask = batch["index"] == pred_no
+            if label_mask.sum() == 0:
+                label = ["O"] * (input_len - 2)
+            else:
+                label = batch["label"][label_mask]
+                label = label.cpu().numpy()
+                label = [[
+                    args.id2label[lb[0]], 
+                    round(lb[1] + 0.5) - 1, 
+                    round(lb[2] - 0.5) - 1
+                ] for lb in label]
+                label = processor.entities2tags(label, input_len - 2)
             y_true.append(label)
         
     results = classification_report(y_true, y_pred, digits=6, output_dict=True, scheme=args.scheme)
@@ -790,13 +823,21 @@ def predict(args, model, processor, tokenizer, prefix=""):
                 if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
-            (start_logits, end_logits) = outputs[0]
+            conf_logits, cls_logits, reg_logits = outputs['logits']
 
-        preds = model.ssd.decode_logits_batch(
-            start_logits[:, 1:-1], end_logits[:, 1:-1])
-        pred, input_len = preds[0], batch["input_len"][0]
-        pred = [(id2label[t], b, e) for t, b, e in pred if id2label[t] != "O"]
-        pred = processor.entities2tags(pred, input_len - 2)
+        dets, tags, index = model.ssd.decode(
+            batch["input_len"], conf_logits, cls_logits, reg_logits)
+        input_len = batch["input_len"][0]
+        pred_mask = index == 0
+        if pred_mask.sum() == 0:
+            pred = ["O"] * (input_len - 2)
+        else:
+            pred = [[
+                args.id2label[tag.item()], 
+                round(det[0].item() + 0.5) - 1, 
+                round(det[1].item() - 0.5) - 1
+            ] for det, tag in zip(dets[pred_mask], tags[pred_mask])]
+            pred = processor.entities2tags(pred, input_len - 2)
         results.append({
             "id": step,
             "tag_seq": " ".join(pred),
@@ -905,6 +946,8 @@ if __name__ == "__main__":
     config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                                           num_labels=num_labels, anchor_size=args.anchor_size, 
                                           iou_thresh_pos=args.iou_thresh_pos, iou_thresh_neg=args.iou_thresh_neg, 
+                                          weight_conf=args.weight_conf, weight_cls=args.weight_cls, weight_reg=args.weight_reg,
+                                          conf_thresh=args.conf_thresh, nms_thresh=args.nms_thresh, tag_o=args.label2id["O"],
                                           cache_dir=args.cache_dir if args.cache_dir else None, )
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                                                 do_lower_case=args.do_lower_case,
