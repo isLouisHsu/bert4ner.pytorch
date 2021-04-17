@@ -4,13 +4,6 @@ from torch.nn import functional as F
 from typing import List
 from torchtyping import TensorType
 
-# TODO: 
-# 实体位置坐标确认
-# 读取数据那边，实体坐标要改
-# x x x x x x x x
-#  | | |
-# 实体长度和anchor尺寸间iou的关系
-
 fcenter = lambda left, right: (left + right) / 2.
 fsize = lambda left, right: right - left
 fleft = lambda center, size: center - size / 2.
@@ -219,10 +212,6 @@ class SSDLoss(nn.Module):
         super().__init__()
         self.tag_o = tag_o
 
-        # weight_sum = weight_conf + weight_cls + weight_reg
-        # self.weight_conf = weight_conf / weight_sum
-        # self.weight_cls = weight_cls / weight_sum
-        # self.weight_reg = weight_reg / weight_sum
         self.weight_conf = weight_conf
         self.weight_cls = weight_cls
         self.weight_reg = weight_reg
@@ -244,9 +233,6 @@ class SSDLoss(nn.Module):
         conf_label, cls_label, reg_label = encode(batch_size, sequence_length, 
             input_len, label, index, anchors, iou_thresh_pos, iou_thresh_neg,
             ignore_index=self.IGNORE_INDEX, tag_o=self.tag_o)
-
-        # dets, tags, index = decode(input_len, conf_logits, cls_logits, reg_logits, anchors,
-        #     conf_thresh=0.7, nms_thresh=0.7, tag_o=1)
         
         # focal loss
         weight = None
