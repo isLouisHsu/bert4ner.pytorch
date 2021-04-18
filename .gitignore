@@ -1,6 +1,7 @@
 *.pyc
 *.lock
 .vscode/
+*/.ipynb_checkpoints/
 outputs/*
 cache/*
 !*/.gitkeep

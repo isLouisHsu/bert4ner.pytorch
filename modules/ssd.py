@@ -48,13 +48,12 @@ def encode(batch_size, sequence_length,
     iou_thresh_pos: float,
     iou_thresh_neg: float,
     ignore_index: int,
-    tag_o: int,
 ):
     num_anchors = anchors.size(1)
     anchors_lr = torch.stack([fleft(anchors[..., 0], anchors[..., 1]), 
         fright(anchors[..., 0], anchors[..., 1])], dim=-1)
     conf_label = torch.zeros(batch_size, sequence_length, num_anchors, 
-        device=label.device, dtype=torch.long).fill_(0)
+        device=label.device, dtype=torch.long).fill_(ignore_index)
     cls_label = torch.zeros(batch_size, sequence_length, num_anchors, 
         device=label.device, dtype=torch.long).fill_(ignore_index)
     reg_label = torch.zeros(batch_size, sequence_length, num_anchors, 2, 
@@ -72,10 +71,10 @@ def encode(batch_size, sequence_length,
         label_ious_max_, label_index_ = ious_.max(dim=0)                # shape(len_, num_anchors)
                                                                         # `label_index_` is the matched label index for each anchor
         # get ground truth for confidence & classification
-        neg_mask_ = label_ious_max_ <= iou_thresh_neg
-        pos_mask_ = label_ious_max_ >= iou_thresh_pos
+        neg_mask_ = (label_ious_max_ <= iou_thresh_neg) & (label_ious_max_ > 0.)
+        pos_mask_ = (label_ious_max_ >= iou_thresh_pos) & (label_ious_max_ > 0.)
         conf_label[b, :len_] = torch.where(pos_mask_, 1, conf_label[b, :len_])
-        cls_label[b, :len_] = torch.where(neg_mask_, tag_o, cls_label[b, :len_])
+        conf_label[b, :len_] = torch.where(neg_mask_, 0, conf_label[b, :len_])
         cls_label[b, :len_] = torch.where(pos_mask_, label_[label_index_, 0].long(), cls_label[b, :len_])
         # get ground truth for regression
         anchors_cs_ = anchors[:len_].view(-1, 2)                        # shape(len_ * num_anchors, 2)
@@ -148,6 +147,20 @@ def decode(
     return dets, tags, index
 
 
+class PredictHead(nn.Module):
+
+    def __init__(self, hidden_size, output_size):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, output_size),
+        )
+    
+    def forward(self, hidden_states):
+        return self.layers(hidden_states)
+
+
 class SSD(nn.Module):
 
     def __init__(self, hidden_size: int, num_labels: int, max_seq_length: int, anchor_size: List[int], 
@@ -156,13 +169,14 @@ class SSD(nn.Module):
 
         self.register_buffer("anchors", self._get_anchors(max_seq_length, anchor_size))
 
+        self.anchor_size = anchor_size
         self.num_anchors = len(anchor_size)
         self.conf_thresh = conf_thresh
         self.nms_thresh = nms_thresh
         self.tag_o = tag_o
-        self.conf_head = nn.Linear(hidden_size, self.num_anchors)
-        self.cls_head = nn.Linear(hidden_size, self.num_anchors * num_labels)
-        self.reg_head = nn.Linear(hidden_size, self.num_anchors * 2)
+        self.conf_head = PredictHead(hidden_size, self.num_anchors)
+        self.cls_head  = PredictHead(hidden_size, self.num_anchors * num_labels)
+        self.reg_head  = PredictHead(hidden_size, self.num_anchors * 2)
 
     def _get_anchors(self, max_seq_length: int, anchor_size: List[int]):
         position = torch.arange(max_seq_length)
@@ -203,6 +217,37 @@ class SSD(nn.Module):
             tag_o=self.tag_o,
         )
 
+    def state(self, inputs, iou_thresh_pos, iou_thresh_neg, ignore_index=-100):
+        conf_label, cls_label, reg_label = encode(
+            batch_size=inputs['input_len'].size(0), 
+            sequence_length=inputs['input_len'].max(),
+            input_len=inputs['input_len'],
+            label=inputs['label'],
+            index=inputs['index'],
+            anchors=self.anchors,
+            iou_thresh_pos=iou_thresh_pos,
+            iou_thresh_neg=iou_thresh_neg,
+            ignore_index=ignore_index,
+        )
+        pos_mask = conf_label == 1
+        neg_mask = conf_label == 0
+        num_total = conf_label.view(-1).size(0)
+        num_pos = pos_mask.int().sum().item()
+        num_neg = neg_mask.int().sum().item()
+        return conf_label, cls_label, reg_label, {
+            "iou_thresh_pos": iou_thresh_pos,
+            "iou_thresh_neg": iou_thresh_neg,
+            "num_total": num_total,
+            "num_pos": num_pos,
+            "num_neg": num_neg,
+            "anchor_size": self.anchor_size,
+            "num_pos_each_size": [pos_mask[..., i].int().sum().item() for i in range(self.num_anchors)],
+            "num_neg_each_size": [neg_mask[..., i].int().sum().item() for i in range(self.num_anchors)],
+            "ratio_pos": num_pos / num_total,
+            "ratio_neg": num_neg / num_total,
+            "pos_vs_neg": num_pos / num_neg,
+        }
+
 
 class SSDLoss(nn.Module):
 
@@ -232,14 +277,15 @@ class SSDLoss(nn.Module):
         # encode labels
         conf_label, cls_label, reg_label = encode(batch_size, sequence_length, 
             input_len, label, index, anchors, iou_thresh_pos, iou_thresh_neg,
-            ignore_index=self.IGNORE_INDEX, tag_o=self.tag_o)
+            ignore_index=self.IGNORE_INDEX)
         
         # focal loss
         weight = None
 
         # calculate loss
+        conf_mask = conf_label != self.IGNORE_INDEX
         conf_loss = nn.BCEWithLogitsLoss(weight=weight)(
-            conf_logits.view(-1), conf_label.view(-1))
+            conf_logits[conf_mask].view(-1), conf_label[conf_mask].view(-1))
         cls_loss = nn.CrossEntropyLoss(weight=weight, ignore_index=self.IGNORE_INDEX)(
             cls_logits.view(-1, num_labels), cls_label.view(-1))
         reg_loss = nn.MSELoss(reduction='none')(reg_logits, reg_label)
