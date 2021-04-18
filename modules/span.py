@@ -109,6 +109,7 @@ class SpanLoss(nn.Module):
         self.loss_fct = nn.CrossEntropyLoss()
     
     def forward(self, 
+        attention_mask,
         start_logits:   TensorType["batch_size", "sequence_length", "num_labels"], 
         end_logits:     TensorType["batch_size", "sequence_length", "num_labels"],
         start_positions:   TensorType["batch_size", "sequence_length"], 

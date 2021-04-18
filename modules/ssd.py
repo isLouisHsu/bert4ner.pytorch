@@ -47,6 +47,7 @@ def encode(batch_size, sequence_length,
     anchors: TensorType["max_seq_length", "num_anchors", "2(center, size)"],
     iou_thresh_pos: float,
     iou_thresh_neg: float,
+    neg_sample_rate: float,
     ignore_index: int,
 ):
     num_anchors = anchors.size(1)
@@ -72,7 +73,7 @@ def encode(batch_size, sequence_length,
                                                                         # `label_index_` is the matched label index for each anchor
         # get ground truth for confidence & classification
         neg_mask_ = ((label_ious_max_ <= iou_thresh_neg) & (
-            label_ious_max_ > 0.) | (torch.rand_like(label_ious_max_) < 0.15))
+            label_ious_max_ > 0.) | (torch.rand_like(label_ious_max_) < neg_sample_rate))
         pos_mask_ = (label_ious_max_ >= iou_thresh_pos) & (label_ious_max_ > 0.)
         conf_label[b, :len_] = torch.where(pos_mask_, 1, conf_label[b, :len_])
         conf_label[b, :len_] = torch.where(neg_mask_, 0, conf_label[b, :len_])
@@ -218,7 +219,7 @@ class SSD(nn.Module):
             tag_o=self.tag_o,
         )
 
-    def state(self, inputs, iou_thresh_pos, iou_thresh_neg, ignore_index=-100):
+    def state(self, inputs, iou_thresh_pos, iou_thresh_neg, neg_sample_rate, ignore_index=-100):
         conf_label, cls_label, reg_label = encode(
             batch_size=inputs['input_len'].size(0), 
             sequence_length=inputs['input_len'].max(),
@@ -228,6 +229,7 @@ class SSD(nn.Module):
             anchors=self.anchors,
             iou_thresh_pos=iou_thresh_pos,
             iou_thresh_neg=iou_thresh_neg,
+            neg_sample_rate=neg_sample_rate,
             ignore_index=ignore_index,
         )
         pos_mask = conf_label == 1
@@ -254,13 +256,14 @@ class SSDLoss(nn.Module):
 
     IGNORE_INDEX = -100
 
-    def __init__(self, weight_conf: float=1.0, weight_cls: float=1.0, weight_reg: float=1.0, tag_o: int=1):
+    def __init__(self, weight_conf: float=1.0, weight_cls: float=1.0, weight_reg: float=1.0, 
+            neg_sample_rate: float=0.15):
         super().__init__()
-        self.tag_o = tag_o
 
         self.weight_conf = weight_conf
         self.weight_cls = weight_cls
         self.weight_reg = weight_reg
+        self.neg_sample_rate = neg_sample_rate
     
     def forward(self,
         input_len:  TensorType["batch_size"],
@@ -278,7 +281,7 @@ class SSDLoss(nn.Module):
         # encode labels
         conf_label, cls_label, reg_label = encode(batch_size, sequence_length, 
             input_len, label, index, anchors, iou_thresh_pos, iou_thresh_neg,
-            ignore_index=self.IGNORE_INDEX)
+            self.neg_sample_rate, self.IGNORE_INDEX)
         
         # focal loss
         weight = None

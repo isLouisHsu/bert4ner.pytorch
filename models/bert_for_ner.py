@@ -114,7 +114,7 @@ class BertSpanForNer(BertPreTrainedModel):
         if start_positions is not None and end_positions is not None:
             loss_fct = SpanLoss()
             total_loss, start_loss, end_loss = loss_fct(
-                start_logits, end_logits, start_positions, end_positions)
+                attention_mask, start_logits, end_logits, start_positions, end_positions)
 
         if not return_dict:
             output = (start_logits, end_logits,) + outputs[2:]
@@ -182,7 +182,7 @@ class BertSsdForNer(BertPreTrainedModel):
                 weight_conf=self.config.weight_conf, 
                 weight_cls=self.config.weight_cls, 
                 weight_reg=self.config.weight_reg, 
-                tag_o=self.config.tag_o, 
+                neg_sample_rate=self.config.neg_sample_rate,
             )
             total_loss, conf_loss, cls_loss, reg_loss = loss_fct(
                 input_len, conf_logits, cls_logits, reg_logits, 

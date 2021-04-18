@@ -196,7 +196,7 @@ class NerProcessor(DataProcessor):
     def entities2tags(self, entities, seq_len):
         ner_tags = ["O"] * seq_len
         for t, s, e in entities:
-            if s >= seq_len or e >= seq_len:
+            if s < 0 or s >= seq_len or e < 0 or e >= seq_len:
                 continue
             ner_tags[s] = f"B-{t}"
             for i in range(s + 1, e + 1):
@@ -415,7 +415,7 @@ class NerDataset(torch.utils.data.Dataset):
 
 class Example2Feature:
     
-    def __init__(self, tokenizer, label2id, max_seq_length=256):
+    def __init__(self, tokenizer, label2id, max_seq_length):
         self.tokenizer = tokenizer
         self.label2id = label2id
         self.max_seq_length = max_seq_length
@@ -823,8 +823,9 @@ def load_dataset(args, processor, tokenizer, data_type='train'):
         examples = processor.get_test_examples(args.data_dir, args.test_file)
     if args.local_rank == 0 and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
+    max_seq_length = args.train_max_seq_length if data_type == 'train' else args.eval_max_seq_length
     return NerDataset(examples, process_pipline=[
-        Example2Feature(tokenizer, processor.label2id),
+        Example2Feature(tokenizer, processor.label2id, max_seq_length),
     ])
 
 

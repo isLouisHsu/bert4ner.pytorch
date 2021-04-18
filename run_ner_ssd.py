@@ -47,6 +47,7 @@ class BertConfigSsd(BertConfig):
         weight_conf=1.0, 
         weight_cls=1.0, 
         weight_reg=1.0,
+        neg_sample_rate=0.15,
         conf_thresh=0.7,
         nms_thresh=0.7, 
         tag_o=1, 
@@ -59,6 +60,7 @@ class BertConfigSsd(BertConfig):
         self.weight_conf = weight_conf
         self.weight_cls = weight_cls
         self.weight_reg = weight_reg
+        self.neg_sample_rate = neg_sample_rate
         self.conf_thresh = conf_thresh
         self.nms_thresh = nms_thresh
         self.tag_o = tag_o
@@ -105,6 +107,8 @@ class NerArgumentParser(ArgumentParser):
         self.add_argument("--iou_thresh_pos", default=0.6, type=float,
                             help="Threshold for matching positive anchors.")
         self.add_argument("--iou_thresh_neg", default=0.3, type=float,
+                            help="Threshold for matching negative anchors.")
+        self.add_argument("--neg_sample_rate", default=0.15, type=float,
                             help="Threshold for matching negative anchors.")
         self.add_argument("--weight_conf", default=1.0, type=float,
                             help="Weight for confidence loss for training")
@@ -199,6 +203,8 @@ class NerArgumentParser(ArgumentParser):
 
 class NerProcessor(DataProcessor):
 
+    HALF = 0.5 - 1e-8
+
     def get_train_examples(self, data_dir, data_file):
         """Gets a collection of :class:`InputExample` for the train set."""
         return list(self._create_examples(data_dir, data_file, 'train'))
@@ -229,7 +235,9 @@ class NerProcessor(DataProcessor):
     def entities2tags(self, entities, seq_len):
         ner_tags = ["O"] * seq_len
         for t, s, e in entities:
-            if s >= seq_len or e >= seq_len:
+            if s < 0 or s >= seq_len \
+                or e < 0 or e >= seq_len \
+                or s > e:
                 continue
             ner_tags[s] = f"B-{t}"
             for i in range(s + 1, e + 1):
@@ -442,18 +450,22 @@ class NerDataset(torch.utils.data.Dataset):
 
 class Example2Feature:
     
-    def __init__(self, tokenizer, label2id, max_seq_length=256):
+    def __init__(self, tokenizer, label2id, max_seq_length, half_size):
         self.tokenizer = tokenizer
         self.label2id = label2id
         self.max_seq_length = max_seq_length
+        self.half_size = half_size
     
     def __call__(self, example):
         return self._convert_example_to_feature(example)
 
     def _encode_label(self, entities, input_len):
         truncat_len = input_len - 2
-        label = [[self.label2id[t], (b + 1) - 0.5, (e + 1) + 0.5] for t, b, e in entities \
-            if b < truncat_len and e < truncat_len] # `+1` for [CLS]
+        label = [[
+            self.label2id[t], 
+            (b + 1) - self.half_size, 
+            (e + 1) + self.half_size,
+        ] for t, b, e in entities if b < truncat_len and e < truncat_len] # `+1` for [CLS]
         label = torch.tensor(label)     # (n_entities, 3)
         return label
 
@@ -612,6 +624,12 @@ def train(args, model, processor, tokenizer):
                 )
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
+    # State
+    device = model.device
+    model.to(torch.device('cpu'))
+    logger.info(model.ssd.state(NerDataset.collate_fn(list(train_dataset)), 
+        args.iou_thresh_pos, args.iou_thresh_neg, args.neg_sample_rate)[-1])
+    model.to(device)
 
     global_step = 0
     steps_trained_in_current_epoch = 0
@@ -771,8 +789,8 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
             else:
                 pred = [[
                     args.id2label[tag.item()], 
-                    round(det[0].item() + 0.5) - 1, 
-                    round(det[1].item() - 0.5) - 1
+                    round(det[0].item() + processor.HALF) - 1, 
+                    round(det[1].item() - processor.HALF) - 1
                 ] for det, tag in zip(dets[pred_mask], tags[pred_mask])]
                 pred = processor.entities2tags(pred, input_len - 2)
             y_pred.append(pred)
@@ -785,8 +803,8 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
                 label = label.cpu().numpy()
                 label = [[
                     args.id2label[lb[0]], 
-                    round(lb[1] + 0.5) - 1, 
-                    round(lb[2] - 0.5) - 1
+                    round(lb[1] + processor.HALF) - 1, 
+                    round(lb[2] - processor.HALF) - 1
                 ] for lb in label]
                 label = processor.entities2tags(label, input_len - 2)
             y_true.append(label)
@@ -834,8 +852,8 @@ def predict(args, model, processor, tokenizer, prefix=""):
         else:
             pred = [[
                 args.id2label[tag.item()], 
-                round(det[0].item() + 0.5) - 1, 
-                round(det[1].item() - 0.5) - 1
+                round(det[0].item() + processor.HALF) - 1, 
+                round(det[1].item() - processor.HALF) - 1
             ] for det, tag in zip(dets[pred_mask], tags[pred_mask])]
             pred = processor.entities2tags(pred, input_len - 2)
         results.append({
@@ -871,8 +889,9 @@ def load_dataset(args, processor, tokenizer, data_type='train'):
         examples = processor.get_test_examples(args.data_dir, args.test_file)
     if args.local_rank == 0 and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
+    max_seq_length = args.train_max_seq_length if data_type == 'train' else args.eval_max_seq_length
     return NerDataset(examples, process_pipline=[
-        Example2Feature(tokenizer, processor.label2id),
+        Example2Feature(tokenizer, processor.label2id, max_seq_length, processor.HALF),
     ])
 
 
@@ -885,6 +904,7 @@ if __name__ == "__main__":
         args = parser.parse_args_from_json(json_file=os.path.abspath(sys.argv[1]))
     else:
         args = parser.build_arguments().parse_args()
+    # args = parser.parse_args_from_json(json_file="args/bert_ssd-clue_ner.json")
 
     # Set seed before initializing model.
     seed_everything(args.seed)
@@ -944,7 +964,7 @@ if __name__ == "__main__":
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                                           num_labels=num_labels, anchor_size=args.anchor_size, 
-                                          iou_thresh_pos=args.iou_thresh_pos, iou_thresh_neg=args.iou_thresh_neg, 
+                                          iou_thresh_pos=args.iou_thresh_pos, iou_thresh_neg=args.iou_thresh_neg, neg_sample_rate=args.neg_sample_rate,
                                           weight_conf=args.weight_conf, weight_cls=args.weight_cls, weight_reg=args.weight_reg,
                                           conf_thresh=args.conf_thresh, nms_thresh=args.nms_thresh, tag_o=args.label2id["O"],
                                           cache_dir=args.cache_dir if args.cache_dir else None, )
