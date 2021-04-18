@@ -580,7 +580,7 @@ def train(args, model, processor, tokenizer):
     tr_loss, logging_loss, best_f1 = 0.0, 0.0, 0.0
     model.zero_grad()
     seed_everything(args.seed)  # Added here for reproductibility (even between python 2 and 3)
-    for _ in range(int(args.num_train_epochs)):
+    for epoch_no in range(int(args.num_train_epochs)):
         pbar = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc='Training...')
         for step, batch in pbar:
             # Skip past any already trained steps if resuming training
@@ -612,7 +612,7 @@ def train(args, model, processor, tokenizer):
                     loss_adv = loss_adv.mean()
                 loss_adv.backward()
                 fgm.restore()
-            pbar.set_description(desc=f"Training... loss={loss.item():.6f}")
+            pbar.set_description(desc=f"Training[{epoch_no}]... loss={loss.item():.6f}")
             tr_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if args.fp16:
