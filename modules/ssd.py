@@ -71,7 +71,8 @@ def encode(batch_size, sequence_length,
         label_ious_max_, label_index_ = ious_.max(dim=0)                # shape(len_, num_anchors)
                                                                         # `label_index_` is the matched label index for each anchor
         # get ground truth for confidence & classification
-        neg_mask_ = (label_ious_max_ <= iou_thresh_neg) & (label_ious_max_ > 0.)
+        neg_mask_ = ((label_ious_max_ <= iou_thresh_neg) & (label_ious_max_ > 0.)) | (
+            torch.rand_like(label_ious_max_) < 0.15)
         pos_mask_ = (label_ious_max_ >= iou_thresh_pos) & (label_ious_max_ > 0.)
         conf_label[b, :len_] = torch.where(pos_mask_, 1, conf_label[b, :len_])
         conf_label[b, :len_] = torch.where(neg_mask_, 0, conf_label[b, :len_])
