@@ -235,9 +235,8 @@ class NerProcessor(DataProcessor):
     def entities2tags(self, entities, seq_len):
         ner_tags = ["O"] * seq_len
         for t, s, e in entities:
-            if s < 0 or s >= seq_len \
-                or e < 0 or e >= seq_len \
-                or s > e:
+            if s < 0 or s >= seq_len or e < 0 or e >= seq_len \
+                or s > e or ner_tags[s] != "O" or ner_tags[e] != "O":
                 continue
             ner_tags[s] = f"B-{t}"
             for i in range(s + 1, e + 1):
