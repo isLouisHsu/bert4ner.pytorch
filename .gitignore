@@ -1,5 +1,6 @@
 *.pyc
 *.lock
+tmp.py
 .vscode/
 */.ipynb_checkpoints/
 outputs/*
