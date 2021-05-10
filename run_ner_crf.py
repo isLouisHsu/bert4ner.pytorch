@@ -393,7 +393,7 @@ class IOB2IOBES:
 
 class Example2Feature:
     
-    def __init__(self, tokenizer, label2id, max_seq_length=256):
+    def __init__(self, tokenizer, label2id, max_seq_length):
         self.tokenizer = tokenizer
         self.label2id = label2id
         self.max_seq_length = max_seq_length
@@ -500,7 +500,7 @@ def init_logger(name, log_file='', log_file_level=logging.NOTSET):
 
 def train(args, model, processor, tokenizer):
     """ Train the model """
-    train_dataset = load_and_cache_examples(args, processor, tokenizer, data_type='train')
+    train_dataset = load_dataset(args, processor, tokenizer, data_type='train')
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size,
@@ -580,7 +580,7 @@ def train(args, model, processor, tokenizer):
     tr_loss, logging_loss, best_f1 = 0.0, 0.0, 0.0
     model.zero_grad()
     seed_everything(args.seed)  # Added here for reproductibility (even between python 2 and 3)
-    for _ in range(int(args.num_train_epochs)):
+    for epoch_no in range(int(args.num_train_epochs)):
         pbar = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc='Training...')
         for step, batch in pbar:
             # Skip past any already trained steps if resuming training
@@ -591,7 +591,7 @@ def train(args, model, processor, tokenizer):
             batch = {k: v.to(args.device) for k, v in batch.items() if v is not None}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
-                if args.model_type.split('_')[0] in ["bert", "xlnet"]:
+                if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
 
             outputs = model(**batch)
@@ -612,7 +612,7 @@ def train(args, model, processor, tokenizer):
                     loss_adv = loss_adv.mean()
                 loss_adv.backward()
                 fgm.restore()
-            pbar.set_description(desc=f"Training... loss={loss.item():.6f}")
+            pbar.set_description(desc=f"Training[{epoch_no}]... loss={loss.item():.6f}")
             tr_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if args.fp16:
@@ -677,7 +677,7 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
     eval_output_dir = args.output_dir
     if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(eval_output_dir)
-    eval_dataset = load_and_cache_examples(args, processor, tokenizer, data_type='dev')
+    eval_dataset = load_dataset(args, processor, tokenizer, data_type='dev')
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     # Note that DistributedSampler samples randomly
     eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(eval_dataset)
@@ -702,7 +702,7 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
             batch = {k: v.to(args.device) for k, v in batch.items() if v is not None}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
-                if args.model_type.split('_')[0] in ["bert", "xlnet"]:
+                if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
             tmp_eval_loss, logits = outputs[:2]
@@ -727,7 +727,7 @@ def predict(args, model, processor, tokenizer, prefix=""):
     pred_output_dir = args.output_dir
     if not os.path.exists(pred_output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(pred_output_dir)
-    test_dataset = load_and_cache_examples(args, processor, tokenizer, data_type='test')
+    test_dataset = load_dataset(args, processor, tokenizer, data_type='test')
     # Note that DistributedSampler samples randomly
     test_sampler = SequentialSampler(test_dataset) if args.local_rank == -1 else DistributedSampler(test_dataset)
     test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=1, collate_fn=NerDataset.collate_fn)
@@ -748,7 +748,7 @@ def predict(args, model, processor, tokenizer, prefix=""):
             batch = {k: v.to(args.device) for k, v in batch.items() if v is not None}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
-                if args.model_type.split('_')[0] in ["bert", "xlnet"]:
+                if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
             logits = outputs[0]
@@ -776,7 +776,7 @@ MODEL_CLASSES = {
     "bert_crf": (BertConfig, BertCrfForNer, BertTokenizer),
 }
 
-def load_and_cache_examples(args, processor, tokenizer, data_type='train'):
+def load_dataset(args, processor, tokenizer, data_type='train'):
     if args.local_rank not in [-1, 0] and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
     if data_type == 'train':
@@ -787,8 +787,9 @@ def load_and_cache_examples(args, processor, tokenizer, data_type='train'):
         examples = processor.get_test_examples(args.data_dir, args.test_file)
     if args.local_rank == 0 and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
+    max_seq_length = args.train_max_seq_length if data_type == 'train' else args.eval_max_seq_length
     return NerDataset(examples, process_pipline=[
-        Example2Feature(tokenizer, processor.label2id),
+        Example2Feature(tokenizer, processor.label2id, max_seq_length),
     ])
 
 

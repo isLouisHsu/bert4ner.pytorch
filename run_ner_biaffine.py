@@ -24,7 +24,7 @@ from transformers import (
     BertConfig, 
     BertTokenizer,
 )
-from models.bert_for_ner import BertSpanForNer
+from models.bert_for_ner import BertBiAffineForNer
 
 # trainer & training arguments
 from transformers import AdamW, get_linear_schedule_with_warmup
@@ -184,14 +184,9 @@ class NerProcessor(DataProcessor):
     def _create_examples(self, data_dir, data_file, mode):
         raise NotImplementedError()
     
-    def tags2se(self, ner_tags):
+    def tags2labels(self, ner_tags):
         entities = get_entities(ner_tags)
-        start_positions = ["O"] * len(ner_tags)
-        end_positions   = ["O"] * len(ner_tags)
-        for t, s, e in entities:
-            start_positions[s] = t
-            end_positions[e] = t
-        return start_positions, end_positions
+        return entities
     
     def entities2tags(self, entities, seq_len):
         ner_tags = ["O"] * seq_len
@@ -221,12 +216,11 @@ class MsraNerProcessor(NerProcessor):
                 line_stripped = line.strip()
                 if line_stripped == "":
                     if tokens:
-                        start_positions, end_positions = self.tags2se(ner_tags)
+                        labels = self.tags2labels(ner_tags)
                         yield guid, {
                             "id": f"{mode}-{str(guid)}",
                             "tokens": tokens,
-                            "start_positions": start_positions if mode in ["train", "dev"] else None,
-                            "end_positions": end_positions if mode in ["train", "dev"] else None,
+                            "labels": labels if mode in ["train", "dev"] else None,
                         }
                         guid += 1
                         tokens = []
@@ -238,12 +232,11 @@ class MsraNerProcessor(NerProcessor):
                     tokens.append(splits[0])
                     ner_tags.append(splits[1])
             # last example
-            start_positions, end_positions = self.tags2se(ner_tags)
+            labels = self.tags2labels(ner_tags)
             yield guid, {
                 "id": f"{mode}-{str(guid)}",
                 "tokens": tokens,
-                "start_positions": start_positions if mode in ["train", "dev"] else None,
-                "end_positions": end_positions if mode in ["train", "dev"] else None,
+                "labels": labels if mode in ["train", "dev"] else None,
             }
 
 class PeoplesDailyNerProcessor(NerProcessor):
@@ -264,12 +257,11 @@ class PeoplesDailyNerProcessor(NerProcessor):
                 line_stripped = line.strip()
                 if line_stripped == "":
                     if tokens:
-                        start_positions, end_positions = self.tags2se(ner_tags)
+                        labels = self.tags2labels(ner_tags)
                         yield guid, {
                             "id": f"{mode}-{str(guid)}",
                             "tokens": tokens,
-                            "start_positions": start_positions if mode in ["train", "dev"] else None,
-                            "end_positions": end_positions if mode in ["train", "dev"] else None,
+                            "labels": labels if mode in ["train", "dev"] else None,
                         }
                         guid += 1
                         tokens = []
@@ -281,12 +273,11 @@ class PeoplesDailyNerProcessor(NerProcessor):
                     tokens.append(splits[0])
                     ner_tags.append(splits[1])
             # last example
-            start_positions, end_positions = self.tags2se(ner_tags)
+            labels = self.tags2labels(ner_tags)
             yield guid, {
                 "id": f"{mode}-{str(guid)}",
                 "tokens": tokens,
-                "start_positions": start_positions if mode in ["train", "dev"] else None,
-                "end_positions": end_positions if mode in ["train", "dev"] else None,
+                "labels": labels if mode in ["train", "dev"] else None,
             }
 
 class WeiboNerProcessor(NerProcessor):
@@ -314,14 +305,13 @@ class WeiboNerProcessor(NerProcessor):
                     if not current_words:
                         continue
                     assert len(current_words) == len(ner_tags), "word len doesnt match label length"
-                    start_positions, end_positions = self.tags2se(ner_tags)
+                    labels = self.tags2labels(ner_tags)
                     sentence = (
                         sentence_counter,
                         {
                             "id": f"{mode}-{str(sentence_counter)}",
                             "tokens": current_words,
-                            "start_positions": start_positions if mode in ["train", "dev"] else None,
-                            "end_positions": end_positions if mode in ["train", "dev"] else None,
+                            "labels": labels if mode in ["train", "dev"] else None,
                         },
                     )
                     sentence_counter += 1
@@ -331,14 +321,13 @@ class WeiboNerProcessor(NerProcessor):
 
             # if something remains:
             if current_words:
-                start_positions, end_positions = self.tags2se(ner_tags)
+                labels = self.tags2labels(ner_tags)
                 sentence = (
                     sentence_counter,
                     {
                         "id": f"{mode}-{str(sentence_counter)}",
                         "tokens": current_words,
-                        "start_positions": start_positions if mode in ["train", "dev"] else None,
-                        "end_positions": end_positions if mode in ["train", "dev"] else None,
+                        "labels": labels if mode in ["train", "dev"] else None,
                     },
                 )
                 yield sentence
@@ -359,7 +348,6 @@ class ClueNerProcessor(NerProcessor):
             for sentence_counter, line in enumerate(lines):
                 text = line["text"]
                 label = line.get("label", None)
-                start_positions = end_positions = None
                 if label is not None:
                     ner_tags = ["O"] * len(text)
                     for entity_type, entities in line["label"].items():
@@ -368,14 +356,13 @@ class ClueNerProcessor(NerProcessor):
                                 assert text[start_: end_ + 1] == entity_text
                                 ner_tags[start_] = f"B-{entity_type}"
                                 ner_tags[start_ + 1: end_ + 1] = [f"I-{entity_type}"] * (end_ - start_)
-                    start_positions, end_positions = self.tags2se(ner_tags)
+                    labels = self.tags2labels(ner_tags)
                 sentence = (
                     sentence_counter,
                     {
                         "id": f"{mode}-{str(sentence_counter)}",
                         "tokens": list(line["text"]),
-                        "start_positions": start_positions if mode in ["train", "dev"] else None,
-                        "end_positions": end_positions if mode in ["train", "dev"] else None,
+                        "labels": labels if mode in ["train", "dev"] else None,
                     }
                 )
                 yield sentence
@@ -408,8 +395,11 @@ class NerDataset(torch.utils.data.Dataset):
                 collated[k] = None
                 continue
             t = torch.cat([b[k] for b in batch], dim=0)
-            if k != "input_len":
-                t = t[:, :max_len]
+            if k == "labels":
+                t = t[:, :max_len, :max_len]
+            else:
+                if k != "input_len":
+                    t = t[:, :max_len]
             collated[k] = t
         return collated
 
@@ -423,19 +413,20 @@ class Example2Feature:
     def __call__(self, example):
         return self._convert_example_to_feature(example)
 
-    def _encode_label(self, label, input_len):
-        label = label[:input_len - 2]   # truncation
-        label = ["O"] + label + ["O"]
-        label = label + ["O"] * (self.max_seq_length - len(label))
-        label = [self.label2id[lb] for lb in label]
-        label = torch.tensor(label)[None]
-        return label
+    def _encode_label(self, labels, input_len):
+        encoded = np.full((self.max_seq_length, self.max_seq_length), self.label2id["O"])
+        for type_, start_, end_ in labels:
+            try:
+                encoded[start_ + 1, end_ + 1] = self.label2id[type_]
+            except:
+                pass
+        encoded = torch.from_numpy(encoded).unsqueeze(0)
+        return encoded
 
     def _convert_example_to_feature(self, example):
         id_ = example[1]["id"]
         tokens = example[1]["tokens"]
-        start_positions = example[1]["start_positions"]
-        end_positions   = example[1]["end_positions"  ]
+        labels = example[1]["labels"]
 
         # encode input
         inputs = self.tokenizer.encode_plus(
@@ -450,14 +441,12 @@ class Example2Feature:
         )
         inputs["input_len"] = inputs["attention_mask"].sum(dim=1)  # for special tokens
         
-        if start_positions is None and end_positions is None:
-            inputs["start_positions"] = None
-            inputs["end_positions"  ] = None
+        if labels is None:
+            inputs["labels"] = None
             return inputs
 
         # encode label
-        inputs["start_positions"] = self._encode_label(start_positions, inputs["input_len"])
-        inputs["end_positions"  ] = self._encode_label(end_positions  , inputs["input_len"])
+        inputs["labels"] = self._encode_label(labels, inputs["input_len"])
         return inputs
 
 class FGM():
@@ -730,22 +719,20 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
                 if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
-            tmp_eval_loss, (start_logits, end_logits) = outputs[:2]
+            tmp_eval_loss, logits = outputs[:2]
         if args.n_gpu > 1:
             tmp_eval_loss = tmp_eval_loss.mean()  # mean() to average on multi-gpu parallel evaluating
         eval_loss += tmp_eval_loss.item()
         nb_eval_steps += 1
         
         # calculate metrics
-        preds = model.span.decode_logits_batch(
-            start_logits[:, 1:-1], end_logits[:, 1:-1])
+        preds = model.biaffine.decode_batch(logits)
         for pred_no, (pred, input_len) in enumerate(zip(preds, batch["input_len"])):
             pred = [(id2label[t], b, e) for t, b, e in pred if id2label[t] != "O"]
             pred = processor.entities2tags(pred, input_len - 2)
             y_pred.append(pred)
 
-        labels = model.span.decode_positions_batch(
-            batch["start_positions"][:, 1:-1], batch["end_positions"][:, 1:-1])
+        labels = model.biaffine.decode_batch(batch["labels"], is_logits=False)
         for label_no, (label, input_len) in enumerate(zip(labels, batch["input_len"])):
             label = [(id2label[t], b, e) for t, b, e in label if id2label[t] != "O"]
             label = processor.entities2tags(label, input_len - 2)
@@ -783,10 +770,9 @@ def predict(args, model, processor, tokenizer, prefix=""):
                 if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
-            (start_logits, end_logits) = outputs[0]
+            logits = outputs[0]
 
-        preds = model.span.decode_logits_batch(
-            start_logits[:, 1:-1], end_logits[:, 1:-1])
+        preds = model.biaffine.decode_batch(logits)
         pred, input_len = preds[0], batch["input_len"][0]
         pred = [(id2label[t], b, e) for t, b, e in pred if id2label[t] != "O"]
         pred = processor.entities2tags(pred, input_len - 2)
@@ -809,7 +795,7 @@ PROCESSER_CLASS = {
 }
 
 MODEL_CLASSES = {
-    "bert_span": (BertConfig, BertSpanForNer, BertTokenizer),
+    "bert_biaffine": (BertConfig, BertBiAffineForNer, BertTokenizer),
 }
 
 def load_dataset(args, processor, tokenizer, data_type='train'):
@@ -838,7 +824,7 @@ if __name__ == "__main__":
         args = parser.parse_args_from_json(json_file=os.path.abspath(sys.argv[1]))
     else:
         args = parser.build_arguments().parse_args()
-    # args = parser.parse_args_from_json(json_file="args/bert_span-clue_ner.json")
+    # args = parser.parse_args_from_json(json_file="args/bert_biaffine-clue_ner.json")
 
     # Set seed before initializing model.
     seed_everything(args.seed)
@@ -856,7 +842,7 @@ if __name__ == "__main__":
     logger = init_logger(__name__, log_file=os.path.join(args.output_dir, f'{time_}.log'))
     # Log on each process the small summary:
     logger.warning(
-        f"Process rank: {args.local_rank}, device: {args.device}, n_gpu: {args.n_gpu}"
+        f"Process rank: {args.local_rank}, device: {args.device}, n_gpu: {args.n_gpu}, "
         + f"distributed training: {bool(args.local_rank != -1)}, 16-bits training: {args.fp16}"
     )
     logger.info(f"Training/evaluation parameters {args}")

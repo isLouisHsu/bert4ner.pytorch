@@ -24,7 +24,7 @@ from transformers import (
     BertConfig, 
     BertTokenizer,
 )
-from models.bert_for_ner import BertSpanForNer
+from models.bert_for_ner import BertSsdForNer
 
 # trainer & training arguments
 from transformers import AdamW, get_linear_schedule_with_warmup
@@ -37,6 +37,33 @@ from seqeval.metrics.sequence_labeling import (
     f1_score, precision_score, recall_score,
     get_entities
 )
+
+class BertConfigSsd(BertConfig):
+
+    def __init__(self, 
+        anchor_size=[1, 3, 5, 7], 
+        iou_thresh_pos=0.6, 
+        iou_thresh_neg=0.3, 
+        weight_conf=1.0, 
+        weight_cls=1.0, 
+        weight_reg=1.0,
+        neg_sample_rate=0.15,
+        conf_thresh=0.7,
+        nms_thresh=0.7, 
+        tag_o=1, 
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.anchor_size = anchor_size
+        self.iou_thresh_pos = iou_thresh_pos
+        self.iou_thresh_neg = iou_thresh_neg
+        self.weight_conf = weight_conf
+        self.weight_cls = weight_cls
+        self.weight_reg = weight_reg
+        self.neg_sample_rate = neg_sample_rate
+        self.conf_thresh = conf_thresh
+        self.nms_thresh = nms_thresh
+        self.tag_o = tag_o
 
 class NerArgumentParser(ArgumentParser):
 
@@ -74,7 +101,26 @@ class NerArgumentParser(ArgumentParser):
                             help="Path to pre-trained model or shortcut name selected in the list: " )
         self.add_argument("--output_dir", default=None, type=str, required=True,
                             help="The output directory where the model predictions and checkpoints will be written.", )
-
+        
+        self.add_argument("--anchor_size", default=[1, 3, 5, 7], type=int, nargs="+",
+                            help="Anchor setting for SSD.")
+        self.add_argument("--iou_thresh_pos", default=0.6, type=float,
+                            help="Threshold for matching positive anchors.")
+        self.add_argument("--iou_thresh_neg", default=0.3, type=float,
+                            help="Threshold for matching negative anchors.")
+        self.add_argument("--neg_sample_rate", default=0.15, type=float,
+                            help="Threshold for matching negative anchors.")
+        self.add_argument("--weight_conf", default=1.0, type=float,
+                            help="Weight for confidence loss for training")
+        self.add_argument("--weight_cls", default=1.0, type=float,
+                            help="Weight for classification loss for training")
+        self.add_argument("--weight_reg", default=1.0, type=float,
+                            help="Weight for regression loss for training")
+        self.add_argument("--conf_thresh", default=0.7, type=float,
+                            help="Confidence threshold for interfering")
+        self.add_argument("--nms_thresh", default=0.6, type=float,
+                            help="Non-maximun uppression threshold for interfering")
+        
         # Other parameters
         self.add_argument('--scheme', default='IOB2', type=str,
                             choices=['IOB2', 'IOBES'])
@@ -157,6 +203,8 @@ class NerArgumentParser(ArgumentParser):
 
 class NerProcessor(DataProcessor):
 
+    HALF = 0.5 - 1e-8
+
     def get_train_examples(self, data_dir, data_file):
         """Gets a collection of :class:`InputExample` for the train set."""
         return list(self._create_examples(data_dir, data_file, 'train'))
@@ -184,19 +232,11 @@ class NerProcessor(DataProcessor):
     def _create_examples(self, data_dir, data_file, mode):
         raise NotImplementedError()
     
-    def tags2se(self, ner_tags):
-        entities = get_entities(ner_tags)
-        start_positions = ["O"] * len(ner_tags)
-        end_positions   = ["O"] * len(ner_tags)
-        for t, s, e in entities:
-            start_positions[s] = t
-            end_positions[e] = t
-        return start_positions, end_positions
-    
     def entities2tags(self, entities, seq_len):
         ner_tags = ["O"] * seq_len
         for t, s, e in entities:
-            if s < 0 or s >= seq_len or e < 0 or e >= seq_len:
+            if s < 0 or s >= seq_len or e < 0 or e >= seq_len \
+                or s > e or ner_tags[s] != "O" or ner_tags[e] != "O":
                 continue
             ner_tags[s] = f"B-{t}"
             for i in range(s + 1, e + 1):
@@ -221,12 +261,11 @@ class MsraNerProcessor(NerProcessor):
                 line_stripped = line.strip()
                 if line_stripped == "":
                     if tokens:
-                        start_positions, end_positions = self.tags2se(ner_tags)
+                        entities = get_entities(ner_tags)
                         yield guid, {
                             "id": f"{mode}-{str(guid)}",
                             "tokens": tokens,
-                            "start_positions": start_positions if mode in ["train", "dev"] else None,
-                            "end_positions": end_positions if mode in ["train", "dev"] else None,
+                            "entities": entities if mode in ["train", "dev"] else None,
                         }
                         guid += 1
                         tokens = []
@@ -238,12 +277,11 @@ class MsraNerProcessor(NerProcessor):
                     tokens.append(splits[0])
                     ner_tags.append(splits[1])
             # last example
-            start_positions, end_positions = self.tags2se(ner_tags)
+            entities = get_entities(ner_tags)
             yield guid, {
                 "id": f"{mode}-{str(guid)}",
                 "tokens": tokens,
-                "start_positions": start_positions if mode in ["train", "dev"] else None,
-                "end_positions": end_positions if mode in ["train", "dev"] else None,
+                "entities": entities if mode in ["train", "dev"] else None,
             }
 
 class PeoplesDailyNerProcessor(NerProcessor):
@@ -264,12 +302,11 @@ class PeoplesDailyNerProcessor(NerProcessor):
                 line_stripped = line.strip()
                 if line_stripped == "":
                     if tokens:
-                        start_positions, end_positions = self.tags2se(ner_tags)
+                        entities = get_entities(ner_tags)
                         yield guid, {
                             "id": f"{mode}-{str(guid)}",
                             "tokens": tokens,
-                            "start_positions": start_positions if mode in ["train", "dev"] else None,
-                            "end_positions": end_positions if mode in ["train", "dev"] else None,
+                            "entities": entities if mode in ["train", "dev"] else None,
                         }
                         guid += 1
                         tokens = []
@@ -281,12 +318,11 @@ class PeoplesDailyNerProcessor(NerProcessor):
                     tokens.append(splits[0])
                     ner_tags.append(splits[1])
             # last example
-            start_positions, end_positions = self.tags2se(ner_tags)
+            entities = get_entities(ner_tags)
             yield guid, {
                 "id": f"{mode}-{str(guid)}",
                 "tokens": tokens,
-                "start_positions": start_positions if mode in ["train", "dev"] else None,
-                "end_positions": end_positions if mode in ["train", "dev"] else None,
+                "entities": entities if mode in ["train", "dev"] else None,
             }
 
 class WeiboNerProcessor(NerProcessor):
@@ -314,14 +350,13 @@ class WeiboNerProcessor(NerProcessor):
                     if not current_words:
                         continue
                     assert len(current_words) == len(ner_tags), "word len doesnt match label length"
-                    start_positions, end_positions = self.tags2se(ner_tags)
+                    entities = get_entities(ner_tags)
                     sentence = (
                         sentence_counter,
                         {
                             "id": f"{mode}-{str(sentence_counter)}",
                             "tokens": current_words,
-                            "start_positions": start_positions if mode in ["train", "dev"] else None,
-                            "end_positions": end_positions if mode in ["train", "dev"] else None,
+                            "entities": entities if mode in ["train", "dev"] else None,
                         },
                     )
                     sentence_counter += 1
@@ -331,14 +366,13 @@ class WeiboNerProcessor(NerProcessor):
 
             # if something remains:
             if current_words:
-                start_positions, end_positions = self.tags2se(ner_tags)
+                entities = get_entities(ner_tags)
                 sentence = (
                     sentence_counter,
                     {
                         "id": f"{mode}-{str(sentence_counter)}",
                         "tokens": current_words,
-                        "start_positions": start_positions if mode in ["train", "dev"] else None,
-                        "end_positions": end_positions if mode in ["train", "dev"] else None,
+                        "entities": entities if mode in ["train", "dev"] else None,
                     },
                 )
                 yield sentence
@@ -359,7 +393,7 @@ class ClueNerProcessor(NerProcessor):
             for sentence_counter, line in enumerate(lines):
                 text = line["text"]
                 label = line.get("label", None)
-                start_positions = end_positions = None
+                entities = []
                 if label is not None:
                     ner_tags = ["O"] * len(text)
                     for entity_type, entities in line["label"].items():
@@ -368,14 +402,13 @@ class ClueNerProcessor(NerProcessor):
                                 assert text[start_: end_ + 1] == entity_text
                                 ner_tags[start_] = f"B-{entity_type}"
                                 ner_tags[start_ + 1: end_ + 1] = [f"I-{entity_type}"] * (end_ - start_)
-                    start_positions, end_positions = self.tags2se(ner_tags)
+                    entities = get_entities(ner_tags)
                 sentence = (
                     sentence_counter,
                     {
                         "id": f"{mode}-{str(sentence_counter)}",
                         "tokens": list(line["text"]),
-                        "start_positions": start_positions if mode in ["train", "dev"] else None,
-                        "end_positions": end_positions if mode in ["train", "dev"] else None,
+                        "entities": entities if mode in ["train", "dev"] else [],
                     }
                 )
                 yield sentence
@@ -407,35 +440,38 @@ class NerDataset(torch.utils.data.Dataset):
             if batch[0][k] is None:
                 collated[k] = None
                 continue
-            t = torch.cat([b[k] for b in batch], dim=0)
-            if k != "input_len":
+            t = torch.cat([b[k] if k != "index" else b[k] * no \
+                for no, b in enumerate(batch)], dim=0)
+            if k not in ["input_len", "label", "index"]:
                 t = t[:, :max_len]
             collated[k] = t
         return collated
 
 class Example2Feature:
     
-    def __init__(self, tokenizer, label2id, max_seq_length):
+    def __init__(self, tokenizer, label2id, max_seq_length, half_size):
         self.tokenizer = tokenizer
         self.label2id = label2id
         self.max_seq_length = max_seq_length
+        self.half_size = half_size
     
     def __call__(self, example):
         return self._convert_example_to_feature(example)
 
-    def _encode_label(self, label, input_len):
-        label = label[:input_len - 2]   # truncation
-        label = ["O"] + label + ["O"]
-        label = label + ["O"] * (self.max_seq_length - len(label))
-        label = [self.label2id[lb] for lb in label]
-        label = torch.tensor(label)[None]
+    def _encode_label(self, entities, input_len):
+        truncat_len = input_len - 2
+        label = [[
+            self.label2id[t], 
+            (b + 1) - self.half_size, 
+            (e + 1) + self.half_size,
+        ] for t, b, e in entities if b < truncat_len and e < truncat_len] # `+1` for [CLS]
+        label = torch.tensor(label)     # (n_entities, 3)
         return label
 
     def _convert_example_to_feature(self, example):
         id_ = example[1]["id"]
         tokens = example[1]["tokens"]
-        start_positions = example[1]["start_positions"]
-        end_positions   = example[1]["end_positions"  ]
+        entities = example[1]["entities"]
 
         # encode input
         inputs = self.tokenizer.encode_plus(
@@ -450,14 +486,13 @@ class Example2Feature:
         )
         inputs["input_len"] = inputs["attention_mask"].sum(dim=1)  # for special tokens
         
-        if start_positions is None and end_positions is None:
-            inputs["start_positions"] = None
-            inputs["end_positions"  ] = None
+        if len(entities) == 0:
+            inputs["label"] = None
             return inputs
 
         # encode label
-        inputs["start_positions"] = self._encode_label(start_positions, inputs["input_len"])
-        inputs["end_positions"  ] = self._encode_label(end_positions  , inputs["input_len"])
+        inputs["label"] = self._encode_label(entities, inputs["input_len"])
+        inputs["index"] = torch.ones(inputs["label"].size(0), dtype=torch.int)
         return inputs
 
 class FGM():
@@ -588,6 +623,12 @@ def train(args, model, processor, tokenizer):
                 )
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
+    # State
+    device = model.device
+    model.to(torch.device('cpu'))
+    logger.info(model.ssd.state(NerDataset.collate_fn(list(train_dataset)), 
+        args.iou_thresh_pos, args.iou_thresh_neg, args.neg_sample_rate)[-1])
+    model.to(device)
 
     global_step = 0
     steps_trained_in_current_epoch = 0
@@ -620,7 +661,7 @@ def train(args, model, processor, tokenizer):
                     batch["token_type_ids"] = None
 
             outputs = model(**batch)
-            loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
+            loss, conf_loss, cls_loss, reg_loss = outputs['loss']  # model outputs are always tuple in pytorch-transformers (see doc)
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
             if args.gradient_accumulation_steps > 1:
@@ -637,7 +678,7 @@ def train(args, model, processor, tokenizer):
                     loss_adv = loss_adv.mean()
                 loss_adv.backward()
                 fgm.restore()
-            pbar.set_description(desc=f"Training[{epoch_no}]... loss={loss.item():.6f}")
+            pbar.set_description(desc=f"Training[{epoch_no}]... loss={loss.item():.6f} conf={conf_loss.item():.6f} cls={cls_loss.item():.6f} reg={reg_loss.item():.6f}")
             tr_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if args.fp16:
@@ -730,25 +771,41 @@ def evaluate(args, model, processor, tokenizer, prefix=""):
                 if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
-            tmp_eval_loss, (start_logits, end_logits) = outputs[:2]
+            tmp_eval_loss, conf_loss, cls_loss, reg_loss = outputs['loss']
+            conf_logits, cls_logits, reg_logits = outputs['logits']
         if args.n_gpu > 1:
             tmp_eval_loss = tmp_eval_loss.mean()  # mean() to average on multi-gpu parallel evaluating
         eval_loss += tmp_eval_loss.item()
         nb_eval_steps += 1
         
         # calculate metrics
-        preds = model.span.decode_logits_batch(
-            start_logits[:, 1:-1], end_logits[:, 1:-1])
-        for pred_no, (pred, input_len) in enumerate(zip(preds, batch["input_len"])):
-            pred = [(id2label[t], b, e) for t, b, e in pred if id2label[t] != "O"]
-            pred = processor.entities2tags(pred, input_len - 2)
+        dets, tags, index = model.ssd.decode(
+            batch["input_len"], conf_logits, cls_logits, reg_logits)
+        for pred_no, input_len in enumerate(batch["input_len"]):
+            pred_mask = index == pred_no
+            if pred_mask.sum() == 0:
+                pred = ["O"] * (input_len - 2)
+            else:
+                pred = [[
+                    args.id2label[tag.item()], 
+                    round(det[0].item() + processor.HALF) - 1, 
+                    round(det[1].item() - processor.HALF) - 1
+                ] for det, tag in zip(dets[pred_mask], tags[pred_mask])]
+                pred = processor.entities2tags(pred, input_len - 2)
             y_pred.append(pred)
 
-        labels = model.span.decode_positions_batch(
-            batch["start_positions"][:, 1:-1], batch["end_positions"][:, 1:-1])
-        for label_no, (label, input_len) in enumerate(zip(labels, batch["input_len"])):
-            label = [(id2label[t], b, e) for t, b, e in label if id2label[t] != "O"]
-            label = processor.entities2tags(label, input_len - 2)
+            label_mask = batch["index"] == pred_no
+            if label_mask.sum() == 0:
+                label = ["O"] * (input_len - 2)
+            else:
+                label = batch["label"][label_mask]
+                label = label.cpu().numpy()
+                label = [[
+                    args.id2label[lb[0]], 
+                    round(lb[1] + processor.HALF) - 1, 
+                    round(lb[2] - processor.HALF) - 1
+                ] for lb in label]
+                label = processor.entities2tags(label, input_len - 2)
             y_true.append(label)
         
     results = classification_report(y_true, y_pred, digits=6, output_dict=True, scheme=args.scheme)
@@ -783,13 +840,21 @@ def predict(args, model, processor, tokenizer, prefix=""):
                 if args.model_type.split('_')[0] in ["roberta", "xlnet"]:
                     batch["token_type_ids"] = None
             outputs = model(**batch)
-            (start_logits, end_logits) = outputs[0]
+            conf_logits, cls_logits, reg_logits = outputs['logits']
 
-        preds = model.span.decode_logits_batch(
-            start_logits[:, 1:-1], end_logits[:, 1:-1])
-        pred, input_len = preds[0], batch["input_len"][0]
-        pred = [(id2label[t], b, e) for t, b, e in pred if id2label[t] != "O"]
-        pred = processor.entities2tags(pred, input_len - 2)
+        dets, tags, index = model.ssd.decode(
+            batch["input_len"], conf_logits, cls_logits, reg_logits)
+        input_len = batch["input_len"][0]
+        pred_mask = index == 0
+        if pred_mask.sum() == 0:
+            pred = ["O"] * (input_len - 2)
+        else:
+            pred = [[
+                args.id2label[tag.item()], 
+                round(det[0].item() + processor.HALF) - 1, 
+                round(det[1].item() - processor.HALF) - 1
+            ] for det, tag in zip(dets[pred_mask], tags[pred_mask])]
+            pred = processor.entities2tags(pred, input_len - 2)
         results.append({
             "id": step,
             "tag_seq": " ".join(pred),
@@ -809,7 +874,7 @@ PROCESSER_CLASS = {
 }
 
 MODEL_CLASSES = {
-    "bert_span": (BertConfig, BertSpanForNer, BertTokenizer),
+    "bert_ssd": (BertConfigSsd, BertSsdForNer, BertTokenizer),
 }
 
 def load_dataset(args, processor, tokenizer, data_type='train'):
@@ -825,7 +890,7 @@ def load_dataset(args, processor, tokenizer, data_type='train'):
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
     max_seq_length = args.train_max_seq_length if data_type == 'train' else args.eval_max_seq_length
     return NerDataset(examples, process_pipline=[
-        Example2Feature(tokenizer, processor.label2id, max_seq_length),
+        Example2Feature(tokenizer, processor.label2id, max_seq_length, processor.HALF),
     ])
 
 
@@ -838,7 +903,7 @@ if __name__ == "__main__":
         args = parser.parse_args_from_json(json_file=os.path.abspath(sys.argv[1]))
     else:
         args = parser.build_arguments().parse_args()
-    # args = parser.parse_args_from_json(json_file="args/bert_span-clue_ner.json")
+    # args = parser.parse_args_from_json(json_file="args/bert_ssd-clue_ner.json")
 
     # Set seed before initializing model.
     seed_everything(args.seed)
@@ -897,7 +962,11 @@ if __name__ == "__main__":
     args.model_type = args.model_type.lower()
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                                          num_labels=num_labels, cache_dir=args.cache_dir if args.cache_dir else None, )
+                                          num_labels=num_labels, anchor_size=args.anchor_size, 
+                                          iou_thresh_pos=args.iou_thresh_pos, iou_thresh_neg=args.iou_thresh_neg, neg_sample_rate=args.neg_sample_rate,
+                                          weight_conf=args.weight_conf, weight_cls=args.weight_cls, weight_reg=args.weight_reg,
+                                          conf_thresh=args.conf_thresh, nms_thresh=args.nms_thresh, tag_o=args.label2id["O"],
+                                          cache_dir=args.cache_dir if args.cache_dir else None, )
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                                                 do_lower_case=args.do_lower_case,
                                                 cache_dir=args.cache_dir if args.cache_dir else None, )

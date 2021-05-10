@@ -9,7 +9,7 @@
     "dev_file": "example.dev",
     "test_file": "example.train",
     "model_type": "bert_crf",
-    "model_name_or_path": "/media/louishsu/disk/Garage/weights/transformers/chinese-roberta-wwm-ext/",
+    "model_name_or_path": "hfl/chinese-roberta-wwm-ext",
     "output_dir": "outputs/",
     "scheme": "IOB2",
     "loss_type": "ce",

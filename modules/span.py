@@ -100,3 +100,31 @@ class Span(nn.Module):
         end_positions:     TensorType["batch_size", "sequence_length"],
     ):
         return [self.decode_positions(s, e) for s, e in zip(start_positions, end_positions)]
+
+
+class SpanLoss(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.loss_fct = nn.CrossEntropyLoss()
+    
+    def forward(self, 
+        attention_mask,
+        start_logits:   TensorType["batch_size", "sequence_length", "num_labels"], 
+        end_logits:     TensorType["batch_size", "sequence_length", "num_labels"],
+        start_positions:   TensorType["batch_size", "sequence_length"], 
+        end_positions:     TensorType["batch_size", "sequence_length"],
+    ):
+        num_labels = start_logits.size(-1)
+        loss_mask: TensorType["batch_size * sequence_length"] \
+            = attention_mask.view(-1) == 1
+        active_start_logits = start_logits.view(-1, num_labels)[loss_mask]
+        active_end_logits   = end_logits.view(-1, num_labels)[loss_mask]
+        active_start_labels = start_positions.view(-1)[loss_mask]
+        active_end_labels   = end_positions.view(-1)[loss_mask]
+
+        start_loss = self.loss_fct(active_start_logits, active_start_labels)
+        end_loss = self.loss_fct(active_end_logits, active_end_labels)
+        total_loss = (start_loss + end_loss) / 2
+
+        return total_loss, start_loss, end_loss
