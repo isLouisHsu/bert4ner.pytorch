@@ -73,7 +73,7 @@ class BiAffineParser(nn.Module):
                 start_, end_], dim=-1)
             valid_mask = (start_ >= 0) & (end_ >= 0) & (start_ <= end_)
             decoded = decoded[valid_mask].cpu().numpy().tolist()
-            decoded = sorted(decoded, key=lambda x: (x[-2] - x[-1], x[1]))
+            decoded = sorted(decoded, key=lambda x: (x[1], x[-2] - x[-1]))
             
             decoded_ = []
             for t, p, s, e in decoded:
