@@ -61,13 +61,31 @@ class BiAffineParser(nn.Module):
     ):
         decodeds = []
         for b in batch:
-            label = b.max(dim=-1)[1] if is_logits else b
+            if is_logits:
+                prob, label = b.softmax(dim=-1).max(dim=-1)
+            else:
+                label = b
+                prob = torch.ones_like(b, dtype=torch.float)
+            
             start_, end_ = torch.where(~torch.isnan(label))
             start_ = start_ - 1; end_ = end_ - 1
-            decoded = torch.stack([label.view(-1), start_, end_], dim=-1)
+            decoded = torch.stack([label.view(-1), prob.view(-1), 
+                start_, end_], dim=-1)
             valid_mask = (start_ >= 0) & (end_ >= 0) & (start_ <= end_)
-            decoded = decoded[valid_mask]
-            decodeds.append(decoded.cpu().numpy().tolist())
+            decoded = decoded[valid_mask].cpu().numpy().tolist()
+            decoded = sorted(decoded, key=lambda x: (x[-2] - x[-1], x[1]))
+            
+            decoded_ = []
+            for t, p, s, e in decoded:
+                is_covered = False
+                for t_, s_, e_ in decoded_:
+                    if (t == t_) and (min(e, e_) - max(s, s_) >= 0):
+                        is_covered = True
+                        break
+                if is_covered: continue
+                decoded_.append([int(t), int(s), int(e)])
+            decodeds.append(decoded_)
+        
         return decodeds
 
 
