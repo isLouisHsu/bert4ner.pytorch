@@ -13,14 +13,22 @@ class BiAffineParser(nn.Module):
         super().__init__()
         self.num_labels = num_labels
 
-        self.start_fc = nn.Linear(hidden_size, hidden_size)
-        self.end_fc = nn.Linear(hidden_size, hidden_size)
-        self.linear = nn.Linear(2 * hidden_size, num_labels)
+        # self.start_fc = nn.Linear(hidden_size, hidden_size)
+        # self.end_fc = nn.Linear(hidden_size, hidden_size)
+        self.start_fc = nn.Identity()
+        self.end_fc = nn.Identity()
 
         # self.Um = nn.Parameter(torch.Tensor(hidden_size, num_labels, hidden_size))
         # bound = 1 / math.sqrt(hidden_size)
         # nn.init.uniform_(self.Um, -bound, bound)
-        # nn.init.zeros_(self.Um)
+        # # nn.init.zeros_(self.Um)
+
+        # self.ffn = nn.Linear(2 * hidden_size, num_labels)
+        self.ffn = nn.Sequential(
+            nn.Linear(2 * hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, num_labels),
+        )
     
     def forward(self, 
         hidden_states: TensorType["batch_size", "sequence_length", "hidden_size"]
@@ -38,11 +46,11 @@ class BiAffineParser(nn.Module):
         #     .permute(0, 1, 3, 2) \
         #     .contiguous()
         item2: TensorType["batch_size", "sequence_length", "sequence_length", "num_labels"] = \
-            self.linear(torch.cat([
+            self.ffn(torch.cat([
             x_start.unsqueeze(2).expand(batch_size, sequence_length, sequence_length, hidden_size), 
             x_end.unsqueeze(1).expand(batch_size, sequence_length, sequence_length, hidden_size),
         ], dim=-1))
-        
+
         # logits = item1 + item2
         logits = item2
         return logits
