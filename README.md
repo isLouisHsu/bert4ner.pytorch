@@ -40,28 +40,28 @@ Pretrained language model(PLM) including
 Named Entity Recognition Prediction Header including
 - [CRF](https://arxiv.org/abs/1508.01991): Bidirectional LSTM-CRF Models for Sequence Tagging
 - [SPAN]()
-- [MRC-modified](https://arxiv.org/abs/1910.11476): A Unified MRC Framework for Named Entity Recognition
 - [Biaffine](https://arxiv.org/abs/2005.07150): Named Entity Recognition as Dependency Parsing
+<!-- - [MRC-modified](https://arxiv.org/abs/1910.11476): A Unified MRC Framework for Named Entity Recognition -->
 
 ### Benchmarks
 
 #### Models
 
 The performance on **dev** set of `CLUENER2000`(F1 score).
-| entitiy       | Human Performance | Bert-crf | Bert-span |
-|:-------------:|:-----:|:-----:|:-----:|
-| Address       | 43.04 | 64.30 | 65.76 |
-| Book          | 71.70 | 82.58 | 83.61 |
-| Company       | 49.32 | 80.82 | 83.11 |
-| Game          | 80.39 | 84.93 | 85.29 |
-| Government    | 79.27 | 82.92 | 83.07 |
-| Movie         | 63.21 | 83.06 | 83.11 |
-| Person Name   | 74.49 | 88.87 | 88.87 |
-| Organization  | 65.41 | 80.27 | 82.48 |
-| Position      | 55.38 | 79.51 | 80.69 |
-| Scene         | 51.85 | 76.56 | 72.37 |
-| Overall@Macro | 63.41 | 80.38 | 80.84 |
-| Overall@Micro | /     | 80.26 | 81.00 |
+| entitiy       | Human Performance | Bert-crf | Bert-span | Bert-biaffine |
+|:-------------:|:-----:|:-----:|:-----:|:-----:|
+| Address       | 43.04 | 64.30 | 65.76 | 65.06 |
+| Book          | 71.70 | 82.58 | 83.61 | 82.47 |
+| Company       | 49.32 | 80.82 | 83.11 | 81.59 |
+| Game          | 80.39 | 84.93 | 85.29 | 83.36 |
+| Government    | 79.27 | 82.92 | 83.07 | 79.19 |
+| Movie         | 63.21 | 83.06 | 83.11 | 81.85 |
+| Person Name   | 74.49 | 88.87 | 88.87 | 87.55 |
+| Organization  | 65.41 | 80.27 | 82.48 | 82.32 |
+| Position      | 55.38 | 79.51 | 80.69 | 78.72 |
+| Scene         | 51.85 | 76.56 | 72.37 | 68.70 |
+| Overall@Macro | 63.41 | 80.38 | 80.84 | 79.08 |
+| Overall@Micro | /     | 80.26 | 81.00 | 79.48 |
 
 #### Datasets
 
