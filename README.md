@@ -50,18 +50,18 @@ Named Entity Recognition Prediction Header including
 The performance on **dev** set of `CLUENER2000`(F1 score).
 | entitiy       | Human Performance | Bert-crf | Bert-span | Bert-biaffine |
 |:-------------:|:-----:|:-----:|:-----:|:-----:|
-| Address       | 43.04 | 64.30 | 65.76 | 65.06 |
-| Book          | 71.70 | 82.58 | 83.61 | 82.47 |
-| Company       | 49.32 | 80.82 | 83.11 | 81.59 |
-| Game          | 80.39 | 84.93 | 85.29 | 83.36 |
-| Government    | 79.27 | 82.92 | 83.07 | 79.19 |
-| Movie         | 63.21 | 83.06 | 83.11 | 81.85 |
-| Person Name   | 74.49 | 88.87 | 88.87 | 87.55 |
-| Organization  | 65.41 | 80.27 | 82.48 | 82.32 |
-| Position      | 55.38 | 79.51 | 80.69 | 78.72 |
-| Scene         | 51.85 | 76.56 | 72.37 | 68.70 |
-| Overall@Macro | 63.41 | 80.38 | 80.84 | 79.08 |
-| Overall@Micro | /     | 80.26 | 81.00 | 79.48 |
+| Address       | 43.04 | 64.30 | 65.76 | 63.11 |
+| Book          | 71.70 | 82.58 | 83.61 | 83.11 |
+| Company       | 49.32 | 80.82 | 83.11 | 82.13 |
+| Game          | 80.39 | 84.93 | 85.29 | 84.52 |
+| Government    | 79.27 | 82.92 | 83.07 | 80.31 |
+| Movie         | 63.21 | 83.06 | 83.11 | 83.04 |
+| Person Name   | 74.49 | 88.87 | 88.87 | 88.18 |
+| Organization  | 65.41 | 80.27 | 82.48 | 81.37 |
+| Position      | 55.38 | 79.51 | 80.69 | 80.05 |
+| Scene         | 51.85 | 76.56 | 72.37 | 72.95 |
+| Overall@Macro | 63.41 | 80.38 | 80.84 | 79.88 |
+| Overall@Micro | /     | 80.26 | 81.00 | 79.97 |
 
 #### Datasets
 
