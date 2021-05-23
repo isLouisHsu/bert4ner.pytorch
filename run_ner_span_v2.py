@@ -172,8 +172,6 @@ class NerArgumentParser(ArgumentParser):
 
 class NerProcessor(DataProcessor):
 
-    HALF = 0.5 - 1e-8
-
     def get_train_examples(self, data_dir, data_file):
         """Gets a collection of :class:`InputExample` for the train set."""
         return list(self._create_examples(data_dir, data_file, 'train'))
