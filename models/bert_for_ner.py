@@ -1,10 +1,12 @@
 import torch
 from torch import nn
+from torch.tensor import Tensor
 from torchtyping import TensorType
 from transformers import BertPreTrainedModel, BertModel
 from transformers.modeling_outputs import TokenClassifierOutput
 from modules.crf import CRF
 from modules.span import Span, SpanLoss
+from modules.span_v2 import SpanV2, SpanV2Loss
 from modules.ssd import SSD, SSDLoss, decode
 from modules.biaffine import BiAffineParser
 
@@ -124,6 +126,68 @@ class BertSpanForNer(BertPreTrainedModel):
         return TokenClassifierOutput(
             loss=total_loss,
             logits=(start_logits, end_logits,),
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+class BertSpanV2ForNer(BertPreTrainedModel):
+
+    def __init__(self, config):
+        super().__init__(config)
+
+        self.bert = BertModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.span = SpanV2(config.hidden_size, config.num_labels, 
+            config.max_span_length, config.width_embedding_dim)
+        self.init_weights()
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        spans:          TensorType["batch_size", "num_spans", "3"]=None,
+        span_mask:      TensorType["batch_size", "num_spans"]=None,
+        label:          TensorType["batch_size", "num_spans"]=None,
+        input_len:      TensorType["batch_size"]=None,
+        head_mask=None,
+        inputs_embeds=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.bert(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        sequence_output = outputs[0]
+        sequence_output = self.dropout(sequence_output)
+        logits = self.span(sequence_output, spans)  # (batch_size, num_spans, num_labels)
+
+        total_loss = None
+        if label is not None:
+            loss_fct = SpanV2Loss()
+            total_loss = loss_fct(logits, label, span_mask)
+
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return ((total_loss,) + output) if total_loss is not None else output
+
+        return TokenClassifierOutput(
+            loss=total_loss,
+            logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
