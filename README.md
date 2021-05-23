@@ -33,8 +33,8 @@ Datasets used in this repository can be found in [OYE93/Chinese-NLP-Corpus - Git
 ### Models
 
 Pretrained language model(PLM) including
-- [BERT](https://arxiv.org/abs/1706.03762)
-- [NEZHA](https://arxiv.org/abs/1909.00204)
+- [BERT](https://arxiv.org/abs/1706.03762): e.g. `hfl/chinese-roberta-wwm-ext`
+- [NEZHA](https://arxiv.org/abs/1909.00204): e.g. `nghuyong/ernie-1.0`
 - [FLAT](https://arxiv.org/abs/2004.11795)
 
 Named Entity Recognition Prediction Header including
@@ -62,6 +62,24 @@ The performance on **dev** set of `CLUENER2000`(F1 score).
 | Scene         | 51.85 | 76.56 | 72.37 | 74.07 | 75.25 |
 | Overall@Macro | 63.41 | 80.38 | 80.84 | 79.89 | 82.63 |
 | Overall@Micro | /     | 80.26 | 81.00 | 80.08 | 82.72 |
+
+
+| entitiy       | Bert-span-v2 | Ernie-span-v2 |
+|:-------------:|:-----:|:-----:|
+| Address       | 69.51 |
+| Book          | 82.84 |
+| Company       | 85.36 |
+| Game          | 85.66 |
+| Government    | 86.02 |
+| Movie         | 87.26 |
+| Person Name   | 89.58 |
+| Organization  | 84.58 |
+| Position      | 80.24 |
+| Scene         | 75.25 |
+| Overall@Macro | 82.63 |
+| Overall@Micro | 82.72 |
+
+
 
 #### Datasets
 
