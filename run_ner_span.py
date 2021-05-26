@@ -425,7 +425,7 @@ class Example2Feature:
 
     def _encode_label(self, label, input_len):
         label = label[:input_len - 2]   # truncation
-        label = ["O"] + label + ["O"]
+        label = ["[START]"] + label + ["[END]"]
         label = label + ["O"] * (self.max_seq_length - len(label))
         label = [self.label2id[lb] for lb in label]
         label = torch.tensor(label)[None]
@@ -635,7 +635,13 @@ def train(args, model, processor, tokenizer):
                 loss_adv = model(**batch)[0]
                 if args.n_gpu > 1:
                     loss_adv = loss_adv.mean()
-                loss_adv.backward()
+                if args.gradient_accumulation_steps > 1:
+                    loss_adv = loss_adv / args.gradient_accumulation_steps
+                if args.fp16:
+                    with amp.scale_loss(loss_adv, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss_adv.backward()
                 fgm.restore()
             pbar.set_description(desc=f"Training[{epoch_no}]... loss={loss.item():.6f}")
             tr_loss += loss.item()
@@ -844,8 +850,9 @@ if __name__ == "__main__":
     seed_everything(args.seed)
     
     # User-defined post initialization
-    args.output_dir = os.path.join(args.output_dir, 
-        f"{args.task_name}-{args.dataset_name}-{args.model_type}-{args.version}-{args.seed}")
+    output_dir = f"{args.task_name}-{args.dataset_name}-{args.model_type}-{args.version}-{args.seed}"
+    if not args.output_dir.endswith(output_dir):
+        args.output_dir = os.path.join(args.output_dir, output_dir)
     args.logging_dir = args.output_dir
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.cache_dir, exist_ok=True)
