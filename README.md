@@ -20,6 +20,7 @@ RTX3090, Driver Version: 455.38, CUDA Version: 11.1
 - torchtyping==0.1.1
 - tqdm==4.49.0
 - transformers==4.5.0
+- allennlp==2.4.0
 
 ### Datasets
 
