@@ -426,13 +426,14 @@ class Example2Feature:
     def __call__(self, example):
         return self._convert_example_to_feature(example)
     
-    def _encode_span(self, input_len):
-        spans = []
-        for i in range(input_len):
-            for j in range(i, min(input_len, i + self.max_span_length)):
+    def _encode_span(self, max_length, input_len):
+        spans = []; span_mask = []
+        for i in range(max_length):
+            for j in range(i, min(max_length, i + self.max_span_length)):
                 spans.append([i, j, j - i + 1])
+                span_mask.append(0 if i >= input_len else 1)
         spans = torch.tensor([spans])               # (1, num_spans, 3) 
-        span_mask = torch.ones(1, spans.size(1))    # (1, num_spans)
+        span_mask = torch.tensor([span_mask])       # (1, num_spans)
         return spans, span_mask
 
     def _encode_label(self, entities, spans):
@@ -459,7 +460,9 @@ class Example2Feature:
             return_tensors="pt",
         )
         inputs["input_len"] = inputs["attention_mask"].sum(dim=1)  # for special tokens
-        inputs["spans"], inputs["span_mask"] = self._encode_span(inputs["input_len"])
+        input_len = inputs["input_len"].item()
+        inputs["spans"], inputs["span_mask"] = self._encode_span(
+            self.max_seq_length, input_len)
         
         if entities is None:
             inputs["label"] = None
