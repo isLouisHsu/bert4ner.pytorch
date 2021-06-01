@@ -405,7 +405,7 @@ class NerDataset(torch.utils.data.Dataset):
         collated = dict()
         for k in ["input_ids", "token_type_ids", "attention_mask", "input_len"]:
             t = torch.cat([b[k] for b in batch], dim=0)
-            if k != "input_len": t = t[:, :max_len]
+            # if k != "input_len": t = t[:, :max_len]
             collated[k] = t
         for k in ["spans", "span_mask", "label"]:
             if batch[0][k] is None:
