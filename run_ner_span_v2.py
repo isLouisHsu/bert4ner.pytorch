@@ -461,7 +461,7 @@ class Example2Feature:
         inputs["input_len"] = inputs["attention_mask"].sum(dim=1)  # for special tokens
         inputs["spans"], inputs["span_mask"] = self._encode_span(inputs["input_len"])
         
-        if len(entities) == 0:
+        if entities is None:
             inputs["label"] = None
             return inputs
 
@@ -852,7 +852,7 @@ if __name__ == "__main__":
         args = parser.parse_args_from_json(json_file=os.path.abspath(sys.argv[1]))
     else:
         args = parser.build_arguments().parse_args()
-    # args = parser.parse_args_from_json(json_file="args/bert_span_v2-clue_ner.json")
+    # args = parser.parse_args_from_json(json_file="args/bert_span_v2-weibo_ner.json")
 
     # Set seed before initializing model.
     seed_everything(args.seed)
