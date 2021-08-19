@@ -5,7 +5,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchtyping import TensorType
 
-from allennlp.nn.util import batched_index_select
+# from allennlp.nn.util import batched_index_select
+def batched_index_select(target: torch.Tensor, indices: torch.LongTensor) -> torch.Tensor:
+    batch_size, sequence_length, hidden_size = target.size()
+    _, num_spans = indices.size()
+    indexed = []
+    for b in range(batch_size):
+        target_b = target[b]
+        indices_b = indices[b]
+        indexed_b = []
+        for i in range(num_spans):
+            indexed_b.append(target_b[indices_b[i]])
+        indexed_b = torch.stack(indexed_b, dim=0)
+        indexed.append(indexed_b)
+    indexed = torch.stack(indexed, dim=0)
+    return indexed
 
 class SpanV2(nn.Module):
     
