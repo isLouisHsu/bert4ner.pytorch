@@ -1,5 +1,5 @@
-from modules.ssd import decode
-from numpy.lib.function_base import append
+# from modules.ssd import decode
+# from numpy.lib.function_base import append
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,15 +20,31 @@ from torchtyping import TensorType
 #         indexed.append(indexed_b)
 #     indexed = torch.stack(indexed, dim=0)
 #     return indexed
-def batched_index_select(input, index, dim=1):
-    for i in range(1, len(input.shape)):
-        if i != dim:
-            index = index.unsqueeze(i)
-    expanse = list(input.shape)
-    expanse[0] = -1
-    expanse[dim] = -1
-    index = index.expand(expanse)
-    return torch.gather(input, dim, index)
+# def batched_index_select(input, index, dim=1):
+#     for i in range(1, len(input.shape)):
+#         if i != dim:
+#             index = index.unsqueeze(i)
+#     expanse = list(input.shape)
+#     expanse[0] = -1
+#     expanse[dim] = -1
+#     index = index.expand(expanse)
+#     return torch.gather(input, dim, index)
+def batched_index_select(input, index):
+    batch_size, sequence_length, hidden_size = input.size()
+    batch_size, num_spans = index.size()
+    index_onehot = torch.FloatTensor(
+        batch_size, num_spans, sequence_length).to(input.device)
+    index_onehot.zero_()
+    index_onehot.scatter_(2, index.unsqueeze(2), 1)
+    output = torch.bmm(index_onehot, input)
+    return output
+# x = torch.rand(2, 128, 32)
+# i = torch.tensor([
+#     [0, 1, 2, 3, 4],
+#     [2, 4, 6, 7, 9],
+# ], dtype=torch.long)
+# batched_index_select(x, i)
+    
 
 class SpanV2(nn.Module):
     
